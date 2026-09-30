@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+"""Plan and execute a de-duplicated wave of DoD checks (SPEC §3.5).
+
+Usage:
+    wave-run [<path-inside-project>] [--spec <slug|path>]... [--dry-run]
+             [--execute] [--json] [--only <id>]... [--timeout <sec>] [--help]
+
+Only active contracts with a *valid* approval take part (``spec_scope.
+find_valid_approval``); a contract without one is excluded from the plan with a
+WARNING ``wave-unapproved`` -- unapproved work must never be executed.  The
+``cmd`` of every remaining check is canonicalised with
+``spec_scope.canon_command`` and grouped by the canonical string; a group is
+one planned run whose representative is the deterministic minimum
+``(slug, id)``.
+
+By default the wave is a DRY RUN: only the plan is printed and nothing is
+written.  With ``--execute`` the groups run **sequentially** ($H = 1$: never
+two heavy runs at once on the laptop) and for each group ``wave-run`` invokes
+``dod-run --spec <owner> --only <representative-id> --timeout <T>`` -- execution,
+the destructive-command refusal and the evidence-v2 attestation stay entirely
+with ``dod-run``; ``wave-run`` has no run logic of its own.  The representative
+gets the ordinary evidence ``dod-run`` writes; every other member of the group
+gets ``verify/<member-id>.json`` with the run's common fields copied
+(``exit_code``, ``started_at``, ``finished_at``, ``duration_s``, ``tail``,
+``git_head``, ``tree_dirty``) and its own identity fields substituted
+(``check``, ``cmd``, ``spec``, ``spec_sha256``, ``scope_sha256``), plus the
+provenance keys ``via: "wave-run"``, ``wave_id``, ``canon``, ``executed_cmd``,
+``executed_spec`` and ``representative_id``.  Members are honest: their command
+was not run verbatim, it is canonically equivalent to the executed one, and the
+provenance fields say so.
+
+``dod-run`` is resolved on ``$PATH`` first (testability), falling back to the
+sibling of this script (the shipped layout, where ``~/.config/opencode/bin`` is
+deliberately not on ``PATH``).
+
+Exit status: 0 -- the plan is built and (with ``--execute``) every group is
+green; 1 -- at least one group gave a nonzero code; 2 -- usage/resolution error.
+"""
+
+from __future__ import annotations
+
+import datetime
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # no stray __pycache__ in the target project
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec_scope  # noqa: E402  (shared governance semantics)
+
+SPEC_REL = spec_scope.SPEC_REL
+VERIFY_REL = spec_scope.VERIFY_REL
+DEFAULT_TIMEOUT = 900
+TAIL_LIMIT = 2000
+
+USAGE = """Usage:
+    wave-run [<path-inside-project>] [--spec <slug|path>]... [--dry-run]
+             [--execute] [--json] [--only <id>]... [--timeout <sec>] [--help]
+
+Plan a de-duplicated wave of DoD checks: only active approved contracts take
+part, the checks are grouped by their canonical command and each group is one
+run whose representative is min(slug, id). By default nothing is executed and
+nothing is written (--dry-run); --execute runs the groups sequentially through
+`dod-run --spec <owner> --only <representative-id> --timeout <T>` and copies the
+run's evidence to every other group member with `via`/`wave_id`/`canon`/
+`executed_cmd` provenance.
+
+  <path-inside-project>  project root or any path inside it (default: cwd)
+  --spec <slug|path>     restrict the wave to this contract (repeatable)
+  --only <id>            restrict the wave to this check id (repeatable)
+  --timeout <sec>        per-run timeout passed to dod-run (default: 900)
+  --json                 machine-readable plan/results
+"""
+
+
+def die(message: str, code: int = 2) -> None:
+    print(f"wave-run: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def resolve_target(arg: str | None) -> Path:
+    if arg is None:
+        return Path.cwd().resolve()
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    target = target.resolve()
+    if not target.exists():
+        die(f"path not found: {target}")
+    return target
+
+
+def resolve_spec(root: Path, arg: str) -> Path:
+    """Resolve a ``--spec`` argument (bare slug or path) as ``docs-lint`` does."""
+    spec_dir = root / SPEC_REL
+    raw = Path(arg).expanduser()
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.extend([raw, Path(str(raw) + ".md")])
+    else:
+        candidates.extend(
+            [
+                spec_dir / raw,
+                spec_dir / Path(str(raw) + ".md"),
+                Path.cwd() / raw,
+                Path.cwd() / Path(str(raw) + ".md"),
+            ]
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    slugs = [p.stem for p in spec_scope.spec_files(root)]
+    available = ", ".join(slugs) if slugs else "none"
+    die(f"no spec matches {arg}; available: {available}")
+    raise AssertionError("unreachable")  # die() raises
+
+
+def resolve_dod_run() -> str:
+    """``dod-run`` from PATH when present, else the sibling shipped next to us."""
+    found = shutil.which("dod-run")
+    if found:
+        return found
+    sibling = Path(__file__).resolve().parent / "dod-run"
+    if sibling.is_file():
+        return str(sibling)
+    die("cannot find dod-run (neither on $PATH nor next to wave-run)")
+
+
+def spec_rel(root: Path, spec: Path) -> str:
+    try:
+        return spec.relative_to(root).as_posix()
+    except ValueError:
+        return str(spec)
+
+
+def load_checks(root: Path, spec: Path) -> list[dict]:
+    """Strict ``dod`` parse of one contract (same rules as ``dod-run``)."""
+    text = spec_scope.read_text(spec)
+    if text is None:
+        die(f"cannot read spec {spec} as UTF-8")
+    body = spec_scope.parse_fences(text).get("dod")
+    if body is None:
+        die(f"spec {spec_rel(root, spec)} has no machine-readable 'dod' block")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        die(f"invalid 'dod' block JSON in {spec_rel(root, spec)}: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        die(f"'dod' block of {spec_rel(root, spec)} must be an object with a 'checks' array")
+    checks: list[dict] = []
+    seen: set[str] = set()
+    for entry in data["checks"]:
+        if not isinstance(entry, dict):
+            die(f"'dod' check entry is not an object in {spec_rel(root, spec)}: {entry!r}")
+        check_id = entry.get("id")
+        cmd = entry.get("cmd")
+        if not isinstance(check_id, str) or not check_id:
+            die(f"each 'dod' check of {spec_rel(root, spec)} needs a non-empty string 'id'")
+        if not isinstance(cmd, str):
+            die(f"'dod' check {check_id!r} of {spec_rel(root, spec)} needs a string 'cmd'")
+        if check_id in seen:
+            die(f"duplicate 'dod' check id in {spec_rel(root, spec)}: {check_id!r}")
+        if "/" in check_id or "\\" in check_id or check_id in (".", ".."):
+            die(f"unsafe check id (must be a plain file name): {check_id!r}")
+        seen.add(check_id)
+        checks.append({"id": check_id, "cmd": cmd})
+    return checks
+
+
+def build_member(root: Path, spec: Path, check: dict) -> dict:
+    """Everything the plan and the evidence writer need about one check."""
+    try:
+        payload = spec.read_bytes()
+    except OSError as exc:
+        die(f"cannot read spec {spec}: {exc}")
+    text = payload.decode("utf-8", "replace")
+    scope = spec_scope.parse_scope(text)
+    return {
+        "spec": spec,
+        "rel": spec_rel(root, spec),
+        "slug": spec.stem,
+        "id": check["id"],
+        "cmd": check["cmd"],
+        "spec_sha256": hashlib.sha256(payload).hexdigest(),
+        "scope_sha256": spec_scope.scope_digest(root, scope),
+    }
+
+
+def build_plan(
+    root: Path,
+    contracts: list[Path],
+    only_ids: list[str],
+) -> tuple[list[dict], list[dict]]:
+    """Plan groups from the approved ``contracts``; return (groups, warnings)."""
+    warnings: list[dict] = []
+    approved: list[Path] = []
+    for spec in contracts:
+        _record_path, record = spec_scope.find_valid_approval(root, spec)
+        if record is None:
+            warnings.append(
+                {
+                    "file": spec_rel(root, spec),
+                    "check": "wave-unapproved",
+                    "message": "contract has no valid approval; excluded from the wave "
+                    "(approve it with spec-approve before executing)",
+                }
+            )
+            continue
+        approved.append(spec)
+
+    members: list[tuple[dict, Path]] = []
+    for spec in approved:
+        for check in load_checks(root, spec):
+            members.append((build_member(root, spec, check), spec))
+
+    if only_ids:
+        known = {member["id"] for member, _spec in members}
+        unknown = [name for name in only_ids if name not in known]
+        if unknown:
+            available = ", ".join(sorted(known)) if known else "none"
+            die(f"no such check id(s): {', '.join(unknown)}; available: {available}")
+        wanted = set(only_ids)
+        members = [(member, spec) for member, spec in members if member["id"] in wanted]
+
+    grouped: dict[str, list[dict]] = {}
+    for member, _spec in members:
+        grouped.setdefault(spec_scope.canon_command(member["cmd"]), []).append(member)
+
+    groups: list[dict] = []
+    for canon in sorted(grouped):
+        group_members = sorted(grouped[canon], key=lambda item: (item["slug"], item["id"]))
+        representative = group_members[0]
+        groups.append(
+            {
+                "canon": canon,
+                "kind": spec_scope.command_kind(canon),
+                "heavy": spec_scope.is_heavy_command(canon),
+                "representative": representative,
+                "members": group_members,
+            }
+        )
+    return groups, warnings
+
+
+def public_group(group: dict) -> dict:
+    """The JSON-visible half of a plan group (no internal Paths/texts)."""
+    return {
+        "canon": group["canon"],
+        "kind": group["kind"],
+        "heavy": group["heavy"],
+        "representative": {
+            "spec": str(group["representative"]["spec"]),
+            "slug": group["representative"]["slug"],
+            "id": group["representative"]["id"],
+            "cmd": group["representative"]["cmd"],
+        },
+        "members": [
+            {
+                "spec": str(member["spec"]),
+                "slug": member["slug"],
+                "id": member["id"],
+                "cmd": member["cmd"],
+            }
+            for member in group["members"]
+        ],
+        "group_size": len(group["members"]),
+    }
+
+
+def execute_group(root: Path, group: dict, dod_run: str, timeout: int, wave_id: str) -> dict:
+    """Run one group through ``dod-run --only`` and fan the evidence out."""
+    representative = group["representative"]
+    evidence_rel = VERIFY_REL / f"{representative['id']}.json"
+    evidence_path = root / evidence_rel
+    before = evidence_path.stat().st_mtime_ns if evidence_path.is_file() else None
+
+    proc = subprocess.run(
+        [
+            dod_run,
+            "--spec",
+            str(representative["spec"]),
+            "--only",
+            representative["id"],
+            "--timeout",
+            str(timeout),
+        ],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    output = (proc.stdout or "") + (proc.stderr or "")
+    after = evidence_path.stat().st_mtime_ns if evidence_path.is_file() else None
+    fresh = after is not None and (before is None or after != before)
+
+    result: dict = {
+        "canon": group["canon"],
+        "kind": group["kind"],
+        "representative": representative["id"],
+        "representative_spec": str(representative["spec"]),
+        "dod_run_exit": proc.returncode,
+        "evidence_fresh": fresh,
+        "exit_code": None,
+        "members_written": [],
+        "members_skipped": [],
+        "errors": [],
+        "output_tail": output[-TAIL_LIMIT:],
+    }
+    if not fresh:
+        result["errors"].append(
+            f"dod-run produced no fresh evidence for {representative['id']!r} "
+            f"(exit {proc.returncode}); no member evidence was written"
+        )
+        return result
+
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        result["errors"].append(f"cannot read evidence {evidence_rel.as_posix()}: {exc}")
+        return result
+    if not isinstance(evidence, dict):
+        result["errors"].append(f"evidence {evidence_rel.as_posix()} is not a JSON object")
+        return result
+
+    exit_code = evidence.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        exit_code = None
+    result["exit_code"] = exit_code
+
+    for member in group["members"]:
+        if member is representative:
+            continue
+        record = {
+            "check": member["id"],
+            "cmd": member["cmd"],
+            "exit_code": evidence.get("exit_code"),
+            "started_at": evidence.get("started_at"),
+            "finished_at": evidence.get("finished_at"),
+            "duration_s": evidence.get("duration_s"),
+            "spec": str(member["spec"]),
+            "spec_sha256": member["spec_sha256"],
+            "tail": evidence.get("tail"),
+            "git_head": evidence.get("git_head"),
+            "tree_dirty": evidence.get("tree_dirty"),
+            "scope_sha256": member["scope_sha256"],
+            # Provenance: the verbatim command was not this member's.
+            "via": "wave-run",
+            "wave_id": wave_id,
+            "canon": group["canon"],
+            "executed_cmd": representative["cmd"],
+            "executed_spec": str(representative["spec"]),
+            "representative_id": representative["id"],
+        }
+        target_rel = VERIFY_REL / f"{member['id']}.json"
+        payload = (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        try:
+            root.joinpath(target_rel).parent.mkdir(parents=True, exist_ok=True)
+            spec_scope.atomic_write(root / target_rel, payload)
+        except OSError as exc:
+            result["errors"].append(f"cannot write evidence {target_rel.as_posix()}: {exc}")
+            result["members_skipped"].append(member["id"])
+            continue
+        result["members_written"].append(target_rel.as_posix())
+    return result
+
+
+def print_plan_human(groups: list[dict], warnings: list[dict], member_count: int, execute: bool) -> None:
+    for warning in warnings:
+        print(f"WARN: {warning['file']}: [{warning['check']}] {warning['message']}")
+    if not groups:
+        print("plan: nothing to run")
+        return
+    verb = "run" if execute else "would run"
+    print(f"plan: {len(groups)} group(s), {member_count} check(s) from approved contracts")
+    for position, group in enumerate(groups, start=1):
+        representative = group["representative"]
+        heavy = "heavy" if group["heavy"] else "light"
+        print(
+            f"  [{position}] {group['canon']} [{group['kind']}, {heavy}] -> "
+            f"{representative['slug']}#{representative['id']} "
+            f"({len(group['members'])} member(s), {verb} once)"
+        )
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
+
+    execute = False
+    as_json = False
+    path_arg: str | None = None
+    spec_args: list[str] = []
+    only_ids: list[str] = []
+    timeout = DEFAULT_TIMEOUT
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--dry-run":
+            execute = False
+        elif arg == "--execute":
+            execute = True
+        elif arg in ("--spec", "--only", "--timeout"):
+            index += 1
+            if index >= len(args):
+                die(f"{arg} requires a value")
+            value = args[index]
+            if arg == "--spec":
+                spec_args.append(value)
+            elif arg == "--only":
+                only_ids.append(value)
+            else:
+                try:
+                    timeout = int(value)
+                except ValueError:
+                    die(f"--timeout must be an integer number of seconds, got {value!r}")
+                if timeout <= 0:
+                    die(f"--timeout must be positive, got {timeout}")
+        elif arg.startswith("--spec="):
+            spec_args.append(arg.split("=", 1)[1])
+        elif arg.startswith("--only="):
+            only_ids.append(arg.split("=", 1)[1])
+        elif arg.startswith("--timeout="):
+            value = arg.split("=", 1)[1]
+            try:
+                timeout = int(value)
+            except ValueError:
+                die(f"--timeout must be an integer number of seconds, got {value!r}")
+            if timeout <= 0:
+                die(f"--timeout must be positive, got {timeout}")
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif path_arg is None:
+            path_arg = arg
+        else:
+            die(f"unexpected argument: {arg}")
+        index += 1
+
+    target = resolve_target(path_arg)
+    root = spec_scope.find_root(target)
+    if root is None:
+        die(f"no project root containing {SPEC_REL} at or above {target}")
+    root = root.resolve()
+
+    if spec_args:
+        selected: list[Path] = []
+        for selector in spec_args:
+            spec = resolve_spec(root, selector)
+            if spec in selected:
+                continue
+            text = spec_scope.read_text(spec)
+            if text is None or not spec_scope.is_active_spec(root, spec) or spec_scope.classify(text) != "spec":
+                die(f"not an active contract: {selector!r}")
+            selected.append(spec)
+        contracts = sorted(selected, key=lambda item: item.name)
+    else:
+        contracts = spec_scope.active_specs(root)
+
+    groups, warnings = build_plan(root, contracts, only_ids)
+    member_count = sum(len(group["members"]) for group in groups)
+
+    if not execute:
+        if as_json:
+            payload = {
+                "root": str(root),
+                "mode": "dry-run",
+                "timeout": timeout,
+                "warnings": warnings,
+                "plan": [public_group(group) for group in groups],
+                "results": [],
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print_plan_human(groups, warnings, member_count, execute=False)
+        return 0
+
+    dod_run = resolve_dod_run()
+    wave_id = "wave-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    results: list[dict] = []
+    all_ok = True
+    for position, group in enumerate(groups, start=1):
+        if not as_json:
+            representative = group["representative"]
+            print(
+                f"[{position}/{len(groups)}] {representative['slug']}#{representative['id']}: "
+                f"{group['canon']}"
+            )
+        result = execute_group(root, group, dod_run, timeout, wave_id)
+        results.append(result)
+        if result["exit_code"] != 0:
+            all_ok = False
+        if not as_json:
+            print(result["output_tail"], end="" if result["output_tail"].endswith("\n") else "\n")
+            written = ", ".join(result["members_written"]) or "(none)"
+            print(f"  exit={result['exit_code']} -> members: {written}")
+            for message in result["errors"]:
+                print(f"  error: {message}", file=sys.stderr)
+
+    if as_json:
+        payload = {
+            "root": str(root),
+            "mode": "execute",
+            "timeout": timeout,
+            "wave_id": wave_id,
+            "warnings": warnings,
+            "plan": [public_group(group) for group in groups],
+            "results": results,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"wave {wave_id}: {'all groups green' if all_ok else 'at least one group failed'}")
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

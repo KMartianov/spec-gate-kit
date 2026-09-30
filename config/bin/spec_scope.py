@@ -24,7 +24,10 @@ Public surface (see the approved spec §3.8):
     approved_scopes   -- active valid contracts with their mandate (GOV-1/3/7)
 
 Extra helpers used by the tools and the harness: ``scope_report``,
-``find_valid_approval``, ``git_head``, ``tree_dirty``, ``worktree_snapshot``.
+``find_valid_approval``, ``git_head``, ``tree_dirty``, ``worktree_snapshot``,
+``dod_check_ids`` (tolerant ``dod`` id parser), ``canon_command`` (shell-string
+canonicalisation for duplicate detection), ``command_kind`` and
+``is_heavy_command`` (command classification for the preflight/wave tools).
 
 Filesystem helpers shared by the CLI writers: ``find_root`` (nearest project
 root), ``slugify`` (a spec's stable slug) and ``atomic_write`` (same-directory
@@ -675,8 +678,153 @@ def approved_scopes(
     return sorted(out.values(), key=lambda item: item[0].name)
 
 
+# ---------------------------------------------------------------------------
+# dod parsing and command canonicalisation (SPEC §3.3)
+# ---------------------------------------------------------------------------
+
+
+def dod_check_ids(text: str) -> list[str]:
+    """All non-empty string ids of the ``dod`` fence, in declaration order.
+
+    Tolerant by construction: a missing block, broken JSON, a non-dict root, a
+    non-list ``checks`` or a malformed entry yields ``[]``/skips the entry
+    instead of failing (``bin/dod-run`` is the strict parser of this block).
+    """
+    body = parse_fences(text).get("dod")
+    if body is None:
+        return []
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    checks = data.get("checks")
+    if not isinstance(checks, list):
+        return []
+    ids: list[str] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        cid = check.get("id")
+        if isinstance(cid, str) and cid:
+            ids.append(cid)
+    return ids
+
+
+#: The exhaustive set of ENV prefixes ``canon_command`` may normalise away --
+#: exactly the single-thread throttling variables of the compute policy
+#: (config/AGENTS.md).  Any other ``VAR=value`` prefix is opaque and blocks
+#: grouping: it stays verbatim in the canonical string.
+CANON_ENV = frozenset(
+    {
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "PYTHONDONTWRITEBYTECODE",
+    }
+)
+
+_ENV_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)(?=[ \t]|$)")
+_WRAPPER_RES = (
+    re.compile(r"nice[ \t]+-n[ \t]*\d+(?=[ \t]|$)"),
+    re.compile(r"taskset[ \t]+-c[ \t]*[0-9,\-]+(?=[ \t]|$)"),
+    re.compile(r"ionice[ \t]+-c[ \t]*\d+(?=[ \t]|$)"),
+)
+
+
+def canon_command(cmd: str) -> str:
+    r"""Canonical form of a DoD command for duplicate detection (SPEC §3.3).
+
+    The transformation is deliberately narrow so that only provably equivalent
+    shells collapse into one group:
+
+    * whitespace runs are normalised to single spaces;
+    * the throttle wrappers ``nice -n N``, ``taskset -c <list>`` and
+      ``ionice -cN`` are removed from the command head, in any order and
+      repeatedly (they change resources, not what is being run);
+    * leading ENV assignments are recognised only for the exhaustive
+      :data:`CANON_ENV` set: their policy value ``1`` is dropped, while any
+      other value is preserved in sorted head position, so
+      ``OMP_NUM_THREADS=1 ...`` and ``OMP_NUM_THREADS=8 ...`` stay distinct
+      canons;
+    * an unknown ``VAR=...`` prefix is **not** removed and stops the
+      normalisation at that point, so it blocks grouping (two different
+      unknown prefixes are two different canonical commands);
+    * ``python3 -m`` at the head becomes ``python -m``.
+
+    Keyword case is never changed.
+    """
+    text = " ".join(cmd.split())
+    if not text:
+        return text
+    kept_env: list[str] = []
+    while text:
+        match = _ENV_ASSIGN_RE.match(text)
+        if match is not None:
+            name, value = match.group(1), match.group(2)
+            if name not in CANON_ENV:
+                break  # unknown prefix: opaque from here on, blocks grouping
+            if value != "1":
+                kept_env.append(f"{name}={value}")
+            text = text[match.end() :].lstrip()
+            continue
+        wrapper_end: int | None = None
+        for pattern in _WRAPPER_RES:
+            wrapped = pattern.match(text)
+            if wrapped is not None:
+                wrapper_end = wrapped.end()
+                break
+        if wrapper_end is None:
+            break
+        text = text[wrapper_end:].lstrip()
+    if text.startswith("python3 -m "):
+        text = "python -m " + text[len("python3 -m ") :]
+    if kept_env:
+        text = " ".join(sorted(kept_env)) + (" " + text if text else "")
+    return text
+
+
+def command_kind(cmd: str) -> str:
+    """Class of the canonical command: pytest/ctest/cmake/ruff/build/other."""
+    tokens = canon_command(cmd).split()
+    if not tokens:
+        return "other"
+    if "pytest" in tokens or "py.test" in tokens:
+        return "pytest"
+    if "ctest" in tokens:
+        return "ctest"
+    if "ruff" in tokens:
+        return "ruff"
+    if "cmake" in tokens:
+        index = tokens.index("cmake")
+        if "--build" in tokens or tokens[index + 1 : index + 2] == ["build"]:
+            return "build"
+        return "cmake"
+    if tokens[0] in ("make", "ninja", "bazel", "meson"):
+        return "build"
+    if "cargo" in tokens and "build" in tokens:
+        return "build"
+    return "other"
+
+
+def is_heavy_command(cmd: str) -> bool:
+    """True for runs that must not overlap on this laptop (SPEC §3.3).
+
+    Heavy classes are ``pytest``, ``ctest``, ``ruff``, ``build`` (cmake
+    ``--build``/make/ninja/...) -- the commands the compute policy throttles.
+    A plain ``cmake`` configure is classified ``cmake`` and stays light.
+    """
+    kind = command_kind(cmd)
+    if kind in ("pytest", "ctest", "ruff", "build"):
+        return True
+    return False
+
+
 __all__ = [
     "APPROVALS_DIR",
+    "CANON_ENV",
     "HOME",
     "INDEX_TOKENS",
     "SPEC_REL",
@@ -686,14 +834,18 @@ __all__ = [
     "active_specs",
     "approved_scopes",
     "atomic_write",
+    "canon_command",
     "classify",
+    "command_kind",
     "declared_token",
+    "dod_check_ids",
     "find_root",
     "find_valid_approval",
     "git_head",
     "glob_match",
     "glob_regex",
     "is_active_spec",
+    "is_heavy_command",
     "now_iso",
     "parse_fences",
     "parse_scope",

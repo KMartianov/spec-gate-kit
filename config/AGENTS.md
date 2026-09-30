@@ -128,7 +128,13 @@ and is **always refused** for `docs/**`.
   evidence), `bin/docs-lint [<path>] [--spec <slug|path>] [--json] [--quiet]`
   (lints contracts only; also errors on a DoD check `id` duplicated inside one
   spec or shared by two contracts, because the flat `verify/<id>.json` store
-  would be overwritten and one of them could never reach `DONE`).
+  would be overwritten and one of them could never reach `DONE`),
+  `bin/spec-preflight [<path>] [--spec <slug|path>] [--json] [--quiet]` and
+  `bin/wave-run [<path>] [--spec <slug|path>]... [--dry-run] [--json]
+  [--only <id>]... [--timeout <sec>]` (both read-only w.r.t. the repository:
+  `spec-preflight` is the pre-approval consensus lint — it never writes and never
+  executes; `wave-run` defaults to `--dry-run`, executes only with `--execute`,
+  and does so exclusively by delegating to `dod-run`).
 - **Human-only CLIs** (`~/.config/opencode/bin/`, not on `$PATH`): `spec-approve`
   (`<slug>|<path>|<dir>`, `--all`, `--changed`, `--list`, `--restamp`, `--strict`,
   `--approvals-dir PATH`; no argument only previews and never writes),

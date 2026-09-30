@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""Pre-approval consistency lint of a gated project (read-only).
+
+Usage:
+    spec-preflight [<path-inside-project>] [--spec <slug|path>] [--json]
+                   [--quiet] [--all-owners] [--help]
+
+Collects the cross-contract defects that make a wave of DoD runs impossible or
+wasteful *before* a human approves the contracts.  Two severities:
+
+    ERROR   -- DONE-impossibility: the contract cannot be executed or its
+               evidence can never be produced (missing/malformed ``dod``,
+               duplicate ``dod.id`` within or across contracts, a broken
+               ``scope`` fence, a non-contract in the selected set);
+    WARNING -- write-impossibility or waste: no/empty ``scope`` mandate (the
+               gate stays closed, GOV-1), overlapping write zones (W1), heavy
+               commands duplicated across contracts (W2), non-canonical command
+               forms (W3).
+
+The tool is strictly READ-ONLY: nothing is written to disk and no ``dod``
+command is ever executed.  Findings go to stdout; facts travel via ``--json``
+and ``spec-status --json``, never through a second state file (ADR-0003).
+
+``<root>`` is the nearest ancestor containing ``.slim/spec`` (the walk stops at
+a ``.git`` boundary, ``$HOME`` and ``/``).  With ``--spec <slug|path>`` the
+selected contract is the only member of the checked set (a bare slug resolves
+as in ``docs-lint``: ``<root>/.slim/spec/<slug>`` then ``<slug>.md`` then a
+cwd-relative path); a resolution miss exits 2 and lists the available slugs.
+
+Exit status: 0 -- no ERROR; 1 -- at least one ERROR; 2 -- usage/resolution
+error.  ``--quiet`` suppresses the report only when there is no ERROR.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # stay strictly read-only (I-6); no commands run
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec_scope  # noqa: E402  (shared governance semantics)
+
+SPEC_REL = spec_scope.SPEC_REL
+
+USAGE = """Usage:
+    spec-preflight [<path-inside-project>] [--spec <slug|path>] [--json]
+                   [--quiet] [--all-owners] [--help]
+
+Pre-approval consistency lint: ERRORs are DONE-impossibility (broken/missing
+dod, duplicate dod ids, broken scope form), WARNINGs are write-impossibility or
+waste (no scope mandate, overlapping owners, duplicated heavy commands,
+non-canonical command forms). Read-only: nothing is written, nothing is run.
+
+  <path-inside-project>  project root or any path inside it (default: cwd)
+  --spec <slug|path>     lint exactly one contract
+  --json                 machine-readable report (root/errors/warnings/report)
+  --quiet                print nothing when there is no ERROR
+  --all-owners           report the full file->contracts coverage map (>= 1
+                         contract) instead of only the intersections (>= 2)
+"""
+
+# Runner wrappers that canon_command cannot reconcile with the bare command:
+# they are a second spelling of the same run, so dedup will not group them.
+_NONCANONICAL_RUNNER_RE = re.compile(r"(?<![A-Za-z0-9_./-])(uv|poetry|pipenv)[ \t]+run(?=[ \t])")
+
+
+def die(message: str, code: int = 2) -> None:
+    print(f"spec-preflight: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def resolve_target(arg: str | None) -> Path:
+    if arg is None:
+        return Path.cwd().resolve()
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    target = target.resolve()
+    if not target.exists():
+        die(f"path not found: {target}")
+    return target
+
+
+def resolve_spec(root: Path, arg: str) -> Path:
+    """Resolve a ``--spec`` argument (bare slug or path) as ``docs-lint`` does."""
+    spec_dir = root / SPEC_REL
+    raw = Path(arg).expanduser()
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.extend([raw, Path(str(raw) + ".md")])
+    else:
+        candidates.extend(
+            [
+                spec_dir / raw,
+                spec_dir / Path(str(raw) + ".md"),
+                Path.cwd() / raw,
+                Path.cwd() / Path(str(raw) + ".md"),
+            ]
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    slugs = [p.stem for p in spec_scope.spec_files(root)]
+    available = ", ".join(slugs) if slugs else "none"
+    die(f"no spec matches {arg}; available: {available}")
+    raise AssertionError("unreachable")  # die() raises
+
+
+def spec_rel(root: Path, spec: Path) -> str:
+    try:
+        return spec.relative_to(root).as_posix()
+    except ValueError:
+        return str(spec)
+
+
+def dod_pairs(text: str) -> list[tuple[str, str]]:
+    """Tolerant (id, cmd) pairs of the ``dod`` fence; for diagnostics only."""
+    body = spec_scope.parse_fences(text).get("dod")
+    if body is None:
+        return []
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    checks = data.get("checks")
+    if not isinstance(checks, list):
+        return []
+    pairs: list[tuple[str, str]] = []
+    for entry in checks:
+        if not isinstance(entry, dict):
+            continue
+        cid, cmd = entry.get("id"), entry.get("cmd")
+        if isinstance(cid, str) and cid and isinstance(cmd, str):
+            pairs.append((cid, cmd))
+    return pairs
+
+
+def dod_shape_errors(body: str) -> list[str]:
+    """Form defects of a ``dod`` body, verbatim against ``dod-run``'s parser.
+
+    The id rule is exactly ``config/bin/dod-run:248``: ``/``, ``\\``, exactly
+    ``.``, exactly ``..`` and the empty string are forbidden; a dot *inside* an
+    id (``a.b``) is legal.  Duplicate ids belong to E4, not here.
+    """
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        return [f"invalid 'dod' block JSON: {exc}"]
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        return ["'dod' block must be an object with a 'checks' array"]
+    checks = data["checks"]
+    if not checks:
+        return ["'dod' block declares no checks"]
+    messages: list[str] = []
+    for entry in checks:
+        if not isinstance(entry, dict):
+            messages.append(f"'dod' check entry is not an object: {entry!r}")
+            continue
+        check_id = entry.get("id")
+        cmd = entry.get("cmd")
+        if not isinstance(check_id, str) or not check_id:
+            messages.append("each 'dod' check needs a non-empty string 'id'")
+            continue
+        if not isinstance(cmd, str):
+            messages.append(f"'dod' check {check_id!r} needs a string 'cmd'")
+        if "/" in check_id or "\\" in check_id or check_id in (".", ".."):
+            messages.append(
+                f"unsafe check id: {check_id!r} (must be a plain file name: no '/', "
+                f"'\\\\', '.', '..')"
+            )
+    return messages
+
+
+def check_contracts(
+    root: Path,
+    contracts: list[Path],
+    all_owners: bool,
+) -> tuple[list[dict], list[dict], dict]:
+    """Run E1-E4/W1-W3 over ``contracts``; return (errors, warnings, report)."""
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    report: dict = {"contracts": [], "owners": [], "heavy_duplicates": []}
+
+    texts: dict[Path, str] = {}
+    scopes: dict[Path, spec_scope.Scope | None] = {}
+    rels: dict[Path, str] = {}
+
+    for spec in contracts:
+        rel = spec_rel(root, spec)
+        rels[spec] = rel
+        report["contracts"].append(spec.stem)
+        text = spec_scope.read_text(spec)
+        if text is None:
+            errors.append(
+                {"file": rel, "check": "preflight-status", "message": "cannot read spec as UTF-8 text"}
+            )
+            continue
+
+        # (E1) the file must actually be an active contract.
+        if not spec_scope.is_active_spec(root, spec):
+            errors.append(
+                {
+                    "file": rel,
+                    "check": "preflight-status",
+                    "message": "not an active contract (outside the project's .slim/spec, GOV-3)",
+                }
+            )
+        kind = spec_scope.classify(text)
+        if kind != "spec":
+            errors.append(
+                {
+                    "file": rel,
+                    "check": "preflight-status",
+                    "message": f"not a contract (declared role: {kind}); index/undeclared files "
+                    "have no dod circuit and grant no mandate",
+                }
+            )
+        texts[spec] = text
+
+        # (E2) the scope mandate: missing/empty is a WARNING (write-impossibility,
+        # not DONE-impossibility); a broken *form* is an ERROR.
+        scope_report = spec_scope.scope_report(text)
+        if not scope_report.present:
+            warnings.append(
+                {
+                    "file": rel,
+                    "check": "preflight-scope",
+                    "message": "нет `scope`-фенса: гейт не даст мандат (fail-closed) — "
+                    "запись невозможна",
+                }
+            )
+        else:
+            for message in scope_report.errors:
+                errors.append(
+                    {"file": rel, "check": "preflight-scope", "message": f"invalid scope fence: {message}"}
+                )
+            for message in scope_report.warnings:
+                warnings.append({"file": rel, "check": "preflight-scope", "message": message})
+            if not scope_report.errors:
+                scopes[spec] = scope_report.scope
+        if spec not in scopes:
+            scopes[spec] = None
+
+        # (E3) the dod block: strict shape, empty checks forbidden.
+        body = spec_scope.parse_fences(text).get("dod")
+        if body is None:
+            errors.append(
+                {
+                    "file": rel,
+                    "check": "preflight-dod",
+                    "message": "spec has no machine-readable 'dod' fenced block; "
+                    "bin/dod-run cannot record evidence and DONE is unreachable",
+                }
+            )
+        else:
+            for message in dod_shape_errors(body):
+                errors.append({"file": rel, "check": "preflight-dod", "message": message})
+
+        # (W3) non-canonical runner wrappers that canon_command will not reconcile.
+        for _cid, cmd in dod_pairs(text):
+            match = _NONCANONICAL_RUNNER_RE.search(cmd)
+            if match is not None:
+                warnings.append(
+                    {
+                        "file": rel,
+                        "check": "preflight-canon",
+                        "message": f"non-canonical command form {match.group(0).strip()!r}: "
+                        "canon_command cannot reconcile it with the bare command, so dedup "
+                        "will not group it",
+                    }
+                )
+
+    # (E4) duplicate dod ids: within one contract (flat store collision) and
+    # across contracts (the flat verify/<id>.json is overwritten, so one of the
+    # contracts can never reach DONE).
+    per_contract: list[tuple[Path, str, list[str]]] = [
+        (spec, rels[spec], spec_scope.dod_check_ids(text)) for spec, text in texts.items()
+    ]
+    for spec, rel, ids in per_contract:
+        counts: dict[str, int] = {}
+        for cid in ids:
+            counts[cid] = counts.get(cid, 0) + 1
+        for cid in dict.fromkeys(ids):
+            if counts[cid] > 1:
+                errors.append(
+                    {
+                        "file": rel,
+                        "check": "preflight-dod-duplicate",
+                        "message": f"dod check id {cid!r} is declared {counts[cid]} times in "
+                        "this contract; each id must be unique within a contract",
+                    }
+                )
+
+    holders: dict[str, list[tuple[Path, str]]] = {}
+    for spec, rel, ids in per_contract:
+        for cid in dict.fromkeys(ids):
+            holders.setdefault(cid, []).append((spec, rel))
+    for cid, rows in holders.items():
+        if len(rows) < 2:
+            continue
+        names = ", ".join(sorted(rel for _spec, rel in rows))
+        first = min(rel for _spec, rel in rows)
+        errors.append(
+            {
+                "file": first,
+                "check": "preflight-dod-duplicate",
+                "message": f"dod check id {cid!r} is declared by {len(rows)} contracts "
+                f"({names}); bin/dod-run stores evidence flat in verify/{cid}.json, so one "
+                "contract overwrites the other's evidence and can never reach DONE — sunset: "
+                "after the namespaced verify/<slug>/<id>.json migration (P1-10) this becomes a "
+                "WARNING and only a flat-path collision stays an ERROR",
+            }
+        )
+
+    # (W1) single-writer map over every tracked file. Only intersections are
+    # reported by default; --all-owners widens report.owners to coverage >= 1
+    # (the scan itself always covers the whole tracked set).
+    if all_owners or len(contracts) >= 2:
+        coverage: dict[str, list[str]] = {}
+        for tracked in sorted(spec_scope.tracked_files(root)):
+            owners = [
+                spec.stem
+                for spec in contracts
+                if spec in texts and spec_scope.scope_allows(scopes.get(spec), tracked)
+            ]
+            if owners:
+                coverage[tracked] = sorted(owners)
+        for path in sorted(coverage):
+            owners = coverage[path]
+            if len(owners) >= 2:
+                warnings.append(
+                    {
+                        "file": path,
+                        "check": "preflight-owner",
+                        "message": f"written by {len(owners)} contracts "
+                        f"({', '.join(owners)}); keep a single writer or split the deny "
+                        "patterns",
+                    }
+                )
+            if all_owners or len(owners) >= 2:
+                report["owners"].append({"path": path, "contracts": owners})
+
+    # (W2) heavy commands duplicated across contracts; execution dedup is
+    # wave-run's job, this is the pre-approval visibility.
+    groups: dict[str, dict] = {}
+    for spec, rel, _ids in per_contract:
+        for _cid, cmd in dod_pairs(texts[spec]):
+            canon = spec_scope.canon_command(cmd)
+            entry = groups.setdefault(canon, {"contracts": set(), "rels": {}})
+            entry["contracts"].add(spec.stem)
+            entry["rels"].setdefault(spec.stem, rel)
+    for canon in sorted(groups):
+        names = sorted(groups[canon]["contracts"])
+        if len(names) < 2 or not spec_scope.is_heavy_command(canon):
+            continue
+        owner = names[0]
+        warnings.append(
+            {
+                "file": groups[canon]["rels"][owner],
+                "check": "preflight-heavy-duplicate",
+                "message": f"heavy command duplicated by {len(names)} contracts "
+                f"({', '.join(names)}); execute it once per wave via wave-run "
+                f"(suggested owner: {owner})",
+            }
+        )
+        report["heavy_duplicates"].append(
+            {
+                "canon": canon,
+                "kind": spec_scope.command_kind(canon),
+                "contracts": names,
+                "suggested_owner": owner,
+            }
+        )
+
+    errors.sort(key=lambda item: (item["file"], item["check"]))
+    warnings.sort(key=lambda item: (item["file"], item["check"]))
+    return errors, warnings, report
+
+
+def emit(
+    root: Path,
+    errors: list[dict],
+    warnings: list[dict],
+    report: dict,
+    as_json: bool,
+    quiet: bool,
+) -> int:
+    """Print the report (unless ``--quiet`` with no errors) and return the code."""
+    if quiet and not errors:
+        return 0
+    if as_json:
+        payload = {"root": str(root), "errors": errors, "warnings": warnings, "report": report}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        for err in errors:
+            print(f"ERROR: {err['file']}: [{err['check']}] {err['message']}")
+        for warn in warnings:
+            print(f"WARN: {warn['file']}: [{warn['check']}] {warn['message']}")
+        if report["owners"] or report["heavy_duplicates"]:
+            print("Отчёт:")
+            print(f"  contracts: {', '.join(report['contracts']) or '(none)'}")
+            if report["owners"]:
+                print("  owners (file -> contracts):")
+                for row in report["owners"]:
+                    print(f"    {row['path']}: {', '.join(row['contracts'])}")
+            if report["heavy_duplicates"]:
+                print("  heavy duplicates (canon [kind] -> contracts, owner):")
+                for row in report["heavy_duplicates"]:
+                    print(
+                        f"    {row['canon']} [{row['kind']}] -> "
+                        f"{', '.join(row['contracts'])} (owner: {row['suggested_owner']})"
+                    )
+    return 1 if errors else 0
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
+
+    as_json = False
+    quiet = False
+    all_owners = False
+    path_arg: str | None = None
+    spec_arg: str | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--quiet":
+            quiet = True
+        elif arg == "--all-owners":
+            all_owners = True
+        elif arg == "--spec":
+            index += 1
+            if index >= len(args):
+                die("--spec requires a value")
+            spec_arg = args[index]
+        elif arg.startswith("--spec="):
+            spec_arg = arg.split("=", 1)[1] or None
+            if spec_arg is None:
+                die("--spec requires a value")
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif path_arg is None:
+            path_arg = arg
+        else:
+            die(f"unexpected argument: {arg}")
+        index += 1
+
+    target = resolve_target(path_arg)
+    root = spec_scope.find_root(target)
+    if root is None:
+        die(f"no project root containing {SPEC_REL} at or above {target}")
+    root = root.resolve()
+
+    if spec_arg is not None:
+        contracts = [resolve_spec(root, spec_arg)]
+    else:
+        contracts = spec_scope.active_specs(root)
+
+    errors, warnings, report = check_contracts(root, contracts, all_owners)
+    return emit(root, errors, warnings, report, as_json, quiet)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

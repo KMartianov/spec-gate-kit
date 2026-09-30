@@ -172,35 +172,6 @@ def has_dod_block(text: str) -> bool:
     return False
 
 
-def dod_check_ids(text: str) -> list[str]:
-    """Check ids declared by the ``dod`` fence, in order ([] when absent/invalid).
-
-    Only structurally usable entries contribute: a malformed body, a non-dict
-    root, a non-list ``checks`` or a missing/non-string ``id`` is ignored rather
-    than fatal (``bin/dod-run`` is the strict parser of this block).
-    """
-    body = spec_scope.parse_fences(text).get("dod")
-    if body is None:
-        return []
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(data, dict):
-        return []
-    checks = data.get("checks")
-    if not isinstance(checks, list):
-        return []
-    ids: list[str] = []
-    for check in checks:
-        if not isinstance(check, dict):
-            continue
-        cid = check.get("id")
-        if isinstance(cid, str) and cid:
-            ids.append(cid)
-    return ids
-
-
 def spec_rel(root: Path, spec: Path) -> str:
     """POSIX-relative display path for a spec, falling back to the absolute one."""
     try:
@@ -231,7 +202,7 @@ def duplicate_dod_errors(root: Path, spec_filter: Path | None = None) -> list[di
         text = spec_scope.read_text(spec)
         if text is None:
             continue
-        entries.append((spec, spec_rel(root, spec), dod_check_ids(text)))
+        entries.append((spec, spec_rel(root, spec), spec_scope.dod_check_ids(text)))
 
     errors: list[dict] = []
 
