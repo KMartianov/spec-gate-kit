@@ -1,0 +1,455 @@
+#!/usr/bin/env python3
+"""Run the machine-readable Definition-of-Done checks of a spec and record evidence.
+
+Usage:
+    dod-run [--spec <slug|path>] [--root <path>] [--only <id>]... [--timeout <sec>]
+            [--list] [--json] [--help]
+
+Reads the ``dod`` fenced code block from the spec (a block whose info string is
+exactly ``dod``), parses its body as JSON shaped ``{"checks": [{"id", "cmd"},
+...]}`` and runs each selected command in the project root. For every check it
+writes ``<root>/verify/<id>.json`` -- the one place evidence is produced, read
+back later by ``bin/spec-status`` -- and prints one human line per check.
+
+``<root>`` is the nearest ancestor containing ``.slim/spec`` (walk bounded by a
+``.git`` boundary, ``$HOME`` and ``/``) unless ``--root`` overrides it. The spec
+is ``--spec`` when given (a path, or the slug of an active contract), otherwise
+the single active *contract* in ``<root>/.slim/spec/``; indexes
+(``roadmap``/``index`` tokens), ``undeclared`` files and ``archive/**`` have no
+``dod`` circuit, so selecting one is an error and no evidence is written.
+``--only`` may be repeated to select individual checks (default: every check).
+``--list`` prints ``id<TAB>cmd`` and exits without running anything. The default
+timeout is 900 seconds; a timed-out command is recorded with ``exit_code: 124``
+and ``"timeout": true``.
+
+Evidence schema v2 (UTF-8, exactly these keys, ``timeout`` added only on
+timeout; the attestation triple is captured ONCE before any check runs so the
+run's own build artifacts cannot influence it -- GOV-4):
+
+    {"check", "cmd", "exit_code", "started_at", "finished_at", "duration_s",
+     "spec", "spec_sha256", "tail",
+     "git_head": "<40-hex|null>", "tree_dirty": <bool>, "scope_sha256": "<64-hex|null>"}
+
+``git_head`` is ``git rev-parse --verify HEAD`` (null outside a repo / without
+commits); ``tree_dirty`` is true when changes exist outside ``.slim/spec`` and
+``verify``; ``scope_sha256`` digests the tracked files covered by the spec's
+``scope`` fence. ``tail`` holds the last 2000 combined stdout+stderr characters.
+Exit status is 0 iff every selected check exited 0, else 1.
+
+SAFETY: before running anything, a command whose text (case-insensitively)
+matches a destructive pattern is refused with a clear error and no artifact is
+written. The denylist is: ``sudo``, ``mkfs``, ``dd if=``, ``rm -rf /``,
+``rm -rf ~``, ``:(){``, ``shutdown``, ``reboot``, ``chmod -R 777``.
+"""
+
+from __future__ import annotations
+
+import datetime
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # stay strictly read-only (I-6)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec_scope  # noqa: E402  (shared governance semantics)
+
+HOME = Path(os.path.expanduser("~"))
+SPEC_REL = Path(".slim") / "spec"
+VERIFY_REL = Path("verify")
+
+DEFAULT_TIMEOUT = 900
+TAIL_LIMIT = 2000
+
+# Case-insensitive destructive-command denylist (documented in the docstring).
+DENYLIST = (
+    "sudo",
+    "mkfs",
+    "dd if=",
+    "rm -rf /",
+    "rm -rf ~",
+    ":(){",
+    "shutdown",
+    "reboot",
+    "chmod -r 777",
+)
+
+USAGE = """Usage:
+    dod-run [--spec <slug|path>] [--root <path>] [--only <id>]... [--timeout <sec>]
+            [--list] [--json] [--help]
+
+Run the spec's machine-readable ``dod`` checks and write
+``<root>/verify/<id>.json`` evidence for each (v2: git_head, tree_dirty,
+scope_sha256 attest the code revision). ``--spec`` takes a path or the slug of
+an active contract; index, undeclared and archive/** files are refused.
+``--list`` prints ``id<TAB>cmd`` without running. ``--only`` (repeatable)
+selects individual checks. Default timeout 900s; a timeout records
+``exit_code`` 124 and ``"timeout": true``. Exit 0 iff every selected check
+exited 0. Destructive commands are refused.
+"""
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"dod-run: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def now_utc() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def find_root(start: Path) -> Path | None:
+    """Nearest ancestor holding .slim/spec; bounded by .git, $HOME and /."""
+    directory = start if start.is_dir() else start.parent
+    while True:
+        if (directory / SPEC_REL).is_dir():
+            return directory
+        if (directory / ".git").exists():
+            return None
+        if directory == HOME or directory == directory.parent:
+            return None
+        directory = directory.parent
+
+
+def resolve_arg_path(arg: str) -> Path:
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    return target.resolve()
+
+
+def unique_spec_in(root: Path) -> Path | None:
+    """The single active contract, or None; >1 contract is a usage error (GOV-6/7)."""
+    contracts = spec_scope.active_specs(root)
+    if not contracts:
+        return None
+    if len(contracts) > 1:
+        slugs = ", ".join(spec.stem for spec in contracts)
+        die(
+            f"more than one active contract spec in {root / SPEC_REL} ({len(contracts)}): {slugs}; "
+            f"choose one with --spec <slug|path>"
+        )
+    return contracts[0].resolve()
+
+
+def resolve_spec_arg(selector: str, root: Path) -> Path | None:
+    """Resolve ``--spec``: a spec file path, or a slug.
+
+    Slug lookup covers every ``*.md`` directly in ``.slim/spec/`` (contracts,
+    indexes, ``undeclared``) plus ``archive/**``, so the caller can explain
+    *why* a non-contract selection is refused (GOV-7, §3.7.4).
+    """
+    if "/" in selector or selector.endswith(".md"):
+        raw = Path(selector).expanduser()
+        candidates = [raw] if raw.is_absolute() else [Path.cwd() / raw, root / raw]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        return None
+    wanted = selector.lower()
+    for spec in spec_scope.spec_files(root):
+        if spec.stem.lower() == wanted:
+            return spec.resolve()
+    archive_dir = root / SPEC_REL / "archive"
+    if archive_dir.is_dir():
+        for spec in sorted(archive_dir.glob("*.md")):
+            if spec.is_file() and spec.stem.lower() == wanted:
+                return spec.resolve()
+    return None
+
+
+def resolve_root_and_spec(
+    root_arg: str | None, spec_arg: str | None
+) -> tuple[Path, Path]:
+    if root_arg is not None:
+        root = resolve_arg_path(root_arg)
+        if not (root / SPEC_REL).is_dir():
+            die(f"root has no {SPEC_REL} directory: {root}")
+        root = root.resolve()
+    elif spec_arg is not None and ("/" in spec_arg or spec_arg.endswith(".md")):
+        spec_path = resolve_arg_path(spec_arg)
+        if not spec_path.is_file():
+            die(f"spec file not found: {spec_path}")
+        root = find_root(spec_path.parent)
+        if root is None:
+            die(f"no project root containing {SPEC_REL} above {spec_path}")
+        root = root.resolve()
+    else:
+        root = find_root(Path.cwd().resolve())
+        if root is None:
+            die(f"no project root containing {SPEC_REL} at or above {Path.cwd()}")
+        root = root.resolve()
+
+    if spec_arg is None:
+        spec = unique_spec_in(root)
+        if spec is None:
+            die(
+                f"no active contract spec in {root / SPEC_REL}; index (roadmap/index), "
+                f"undeclared and archive/** files have no dod circuit"
+            )
+    else:
+        spec = resolve_spec_arg(spec_arg, root)
+        if spec is None:
+            die(f"spec not found: {spec_arg!r} (neither a path nor an active contract slug)")
+
+    # GOV-3 / GOV-7: the dod circuit exists only for active contracts.
+    if not spec_scope.is_active_spec(root, spec):
+        die(
+            f"inactive spec (archive/** or outside {SPEC_REL}): {spec}; "
+            f"dod-run applies only to active contract specs"
+        )
+    try:
+        text = spec.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        die(f"cannot read spec {spec}: {exc}")
+    role = spec_scope.classify(text)
+    if role != "spec":
+        die(
+            f"not a contract (role={role}): {spec}; the dod circuit applies only to "
+            f"contract specs and no evidence was written"
+        )
+    return root, spec
+
+
+def extract_dod_block(text: str) -> str | None:
+    """Body of the first fenced block whose info string is exactly ``dod``."""
+    return spec_scope.parse_fences(text).get("dod")
+
+
+def parse_dod_checks(text: str) -> list[dict]:
+    body = extract_dod_block(text)
+    if body is None:
+        die(
+            "spec has no machine-readable 'dod' block (a fenced code block with the "
+            "info string 'dod'); nothing to run"
+        )
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        die(f"invalid 'dod' block JSON: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        die("'dod' block must be an object with a 'checks' array")
+    checks: list[dict] = []
+    seen: set[str] = set()
+    for entry in data["checks"]:
+        if not isinstance(entry, dict):
+            die(f"'dod' check entry is not an object: {entry!r}")
+        check_id = entry.get("id")
+        cmd = entry.get("cmd")
+        if not isinstance(check_id, str) or not check_id:
+            die("each 'dod' check needs a non-empty string 'id'")
+        if not isinstance(cmd, str):
+            die(f"'dod' check {check_id!r} needs a string 'cmd'")
+        if check_id in seen:
+            die(f"duplicate 'dod' check id: {check_id!r}")
+        if "/" in check_id or "\\" in check_id or check_id in (".", ".."):
+            die(f"unsafe check id (must be a plain file name): {check_id!r}")
+        seen.add(check_id)
+        checks.append({"id": check_id, "cmd": cmd})
+    return checks
+
+
+def destructive_match(cmd: str) -> str | None:
+    lowered = cmd.lower()
+    for pattern in DENYLIST:
+        if pattern in lowered:
+            return pattern
+    return None
+
+
+def as_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+def run_check(root: Path, spec: Path, digest: str, check: dict, timeout: int, attestation: dict) -> dict:
+    cmd = check["cmd"]
+    matched = destructive_match(cmd)
+    if matched is not None:
+        die(
+            f"refusing to run check {check['id']!r}: command matches destructive "
+            f"denylist pattern {matched!r}"
+        )
+
+    started = now_utc()
+    t0 = time.monotonic()
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        exit_code = proc.returncode
+        output = as_text(proc.stdout) + as_text(proc.stderr)
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        exit_code = 124
+        output = as_text(exc.stdout) + as_text(exc.stderr)
+    duration = time.monotonic() - t0
+    finished = now_utc()
+
+    record = {
+        "check": check["id"],
+        "cmd": cmd,
+        "exit_code": exit_code,
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "duration_s": round(duration, 3),
+        "spec": str(spec),
+        "spec_sha256": digest,
+        "tail": output[-TAIL_LIMIT:],
+        # Evidence v2 (GOV-4): the revision attestation captured before the run.
+        "git_head": attestation["git_head"],
+        "tree_dirty": attestation["tree_dirty"],
+        "scope_sha256": attestation["scope_sha256"],
+    }
+    if timed_out:
+        record["timeout"] = True
+
+    out_dir = root / VERIFY_REL
+    out_file = out_dir / f"{check['id']}.json"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        die(f"cannot write evidence {out_file}: {exc}")
+
+    record["_evidence"] = (VERIFY_REL / f"{check['id']}.json").as_posix()
+    return record
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
+
+    spec_arg: str | None = None
+    root_arg: str | None = None
+    only: list[str] = []
+    list_only = False
+    as_json = False
+    timeout = DEFAULT_TIMEOUT
+
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--spec":
+            index += 1
+            if index >= len(args):
+                die("--spec requires a value")
+            spec_arg = args[index]
+        elif arg == "--root":
+            index += 1
+            if index >= len(args):
+                die("--root requires a value")
+            root_arg = args[index]
+        elif arg == "--only":
+            index += 1
+            if index >= len(args):
+                die("--only requires a value")
+            only.append(args[index])
+        elif arg == "--timeout":
+            index += 1
+            if index >= len(args):
+                die("--timeout requires a value")
+            raw = args[index]
+            try:
+                timeout = int(raw)
+            except ValueError:
+                die(f"--timeout must be an integer number of seconds, got {raw!r}")
+            if timeout <= 0:
+                die(f"--timeout must be positive, got {timeout}")
+        elif arg == "--list":
+            list_only = True
+        elif arg == "--json":
+            as_json = True
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        else:
+            die(f"unexpected argument: {arg}")
+        index += 1
+
+    root, spec = resolve_root_and_spec(root_arg, spec_arg)
+    try:
+        spec_bytes = spec.read_bytes()
+    except OSError as exc:
+        die(f"cannot read spec {spec}: {exc}")
+    digest = hashlib.sha256(spec_bytes).hexdigest()
+    try:
+        text = spec_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        die(f"spec is not valid UTF-8: {spec}: {exc}")
+
+    checks = parse_dod_checks(text)
+
+    # Evidence v2 (GOV-4): capture the revision attestation ONCE, before the
+    # first check runs, so build caches / artifacts cannot influence it.
+    attestation = spec_scope.worktree_snapshot(root, spec_scope.parse_scope(text))
+
+    selected = checks
+    if only:
+        wanted = set(only)
+        known = {check["id"] for check in checks}
+        unknown = [name for name in only if name not in known]
+        if unknown:
+            die(f"no such check id(s): {', '.join(unknown)}")
+        selected = [check for check in checks if check["id"] in wanted]
+
+    if list_only:
+        for check in selected:
+            print(f"{check['id']}\t{check['cmd']}")
+        return 0
+
+    if not selected:
+        print("dod-run: no checks selected", file=sys.stderr)
+        return 0
+
+    records: list[dict] = []
+    all_ok = True
+    for check in selected:
+        record = run_check(root, spec, digest, check, timeout, attestation)
+        records.append(record)
+        if record["exit_code"] != 0:
+            all_ok = False
+        if not as_json:
+            print(
+                f"{record['check']}: exit={record['exit_code']} "
+                f"({record['duration_s']:.2f}s) -> {record['_evidence']}"
+            )
+
+    if as_json:
+        payload = {
+            "spec": str(spec),
+            "spec_sha256": digest,
+            "worktree": attestation,
+            "results": [
+                {
+                    "check": record["check"],
+                    "cmd": record["cmd"],
+                    "exit_code": record["exit_code"],
+                    "duration_s": record["duration_s"],
+                    "evidence": record["_evidence"],
+                    "timeout": bool(record.get("timeout", False)),
+                    "passing": record["exit_code"] == 0,
+                }
+                for record in records
+            ],
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    return 0 if all_ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

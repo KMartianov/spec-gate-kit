@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""Report the Doc-Driven lifecycle state(s) derived from verifiable artifacts.
+
+Usage:
+    spec-status [show] [<path>] [--spec <slug|path>] [--json] [--help]
+
+This tool is READ-ONLY: it never creates or modifies any file. The state is
+recomputed on every invocation from artifacts that can be independently
+verified, so there is deliberately no store that could drift out of sync:
+
+    <root>/.slim/spec/<spec>.md       the specification (its bytes are hashed)
+    <root>/verify/<check-id>.json     per-check evidence written by bin/dod-run
+    $HOME/.local/share/opencode/approvals/<sha256(root)[:16]>/*.json
+                                      human approval records (bin/spec-approve)
+
+``<root>`` is the nearest ancestor containing ``.slim/spec``; the walk stops at
+a ``.git`` boundary, at ``$HOME`` and at ``/``. ``<path>`` defaults to the
+current directory and may be the project, any subdirectory, or the spec file
+itself.
+
+Only *contracts* participate: ``*.md`` files directly in ``<root>/.slim/spec``
+(non-recursive) whose declared status line carries a token outside the reserved
+``{roadmap, index}`` set. Files declaring ``roadmap``/``index`` are indexes;
+files with no status line are ``undeclared`` (fail-closed). Neither gives a
+mandate nor a ``dod`` circuit. ``archive/**`` is inactive: an explicit path
+still yields a report (``active: false``), but archive files never appear in
+the default listing and never have an approval.
+
+An approval is valid iff a record for the project names the same spec whose
+``spec_sha256`` equals the sha256 of the current spec bytes AND the spec is
+active (GOV-3). Evidence is *present* when ``verify/<id>.json`` exists and its
+``spec_sha256`` matches; a check is *passing* only when it is present, exits 0
+and is fresh (GOV-4): its ``git_head`` equals the current ``HEAD`` and its
+``tree_dirty`` is false. Legacy evidence without ``git_head`` is stale by
+definition, so the state falls back to ``VERIFY``.
+
+Derivation (first matching rule wins):
+
+    spec missing                                    -> INTAKE
+    spec exists, no valid approval                  -> SPEC_DESIGN
+    spec exists, valid approval, no valid evidence  -> APPROVED
+    spec exists, valid approval, some evidence but
+        not every check passing                     -> VERIFY
+    spec exists, valid approval, all checks passing -> DONE
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # stay strictly read-only (I-6)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec_scope  # noqa: E402  (shared governance semantics)
+
+HOME = Path(os.path.expanduser("~"))
+SPEC_REL = spec_scope.SPEC_REL
+VERIFY_REL = spec_scope.VERIFY_REL
+
+USAGE = """Usage:
+    spec-status [show] [<path>] [--spec <slug|path>] [--json] [--help]
+
+Report the derived Doc-Driven lifecycle state (INTAKE, DISCOVERY, SPEC_DESIGN,
+APPROVED, AUTONOMOUS_EXEC, VERIFY, DONE) per active contract spec. The tool is
+read-only: nothing is ever written.
+
+<path>       project | subdirectory | spec file (default: cwd)
+--spec S     slug (file name without .md) or path; slug lookup covers the
+             active *.md files in .slim/spec (non-recursive, archive excluded)
+--json       JSON array of reports (one per contract; with --spec <non-contract>
+             exactly one element whose role is not "spec")
+"""
+
+DECLARED_RE = re.compile(
+    r"^[ \t]*-[ \t]*\*\*(?:Статус жизненного цикла|Статус спецификации):\*\*[ \t]*(.*)$",
+    re.MULTILINE,
+)
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"spec-status: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def find_root(start: Path) -> Path | None:
+    """Nearest ancestor holding .slim/spec; bounded by .git, $HOME and /."""
+    directory = start if start.is_dir() else start.parent
+    while True:
+        if (directory / SPEC_REL).is_dir():
+            return directory
+        if (directory / ".git").exists():
+            return None
+        if directory == HOME or directory == directory.parent:
+            return None
+        directory = directory.parent
+
+
+def resolve_start(arg: str | None) -> Path:
+    if arg is None:
+        return Path.cwd().resolve()
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    target = target.resolve()
+    if not target.exists():
+        die(f"path not found: {target}")
+    return target
+
+
+def under_spec_dir(root: Path, spec: Path) -> bool:
+    try:
+        spec.relative_to(root / SPEC_REL)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_selector(root: Path, selector: str) -> Path:
+    """Resolve ``--spec`` (slug or path) to a spec file, active or not."""
+    if "/" in selector or selector.endswith(".md"):
+        candidate = Path(selector).expanduser()
+        candidates = [candidate] if candidate.is_absolute() else [Path.cwd() / candidate, root / candidate]
+        for item in candidates:
+            if item.is_file():
+                spec = item.resolve()
+                if not under_spec_dir(root, spec):
+                    die(f"{spec} is not a spec under {root / SPEC_REL}")
+                return spec
+        die(f"spec file not found: {selector}")
+    contracts, indexes, undeclared = spec_scope.specs_and_indexes(root)
+    wanted = selector.lower()
+    for spec in [*contracts, *indexes, *undeclared]:
+        if spec.stem.lower() == wanted:
+            return spec.resolve()
+    slugs = ", ".join(p.stem for p in contracts) or "none"
+    die(f"no spec with slug {selector!r} in {root / SPEC_REL}; active contracts: {slugs}")
+
+
+def declared_state(text: str) -> str | None:
+    """Prose lifecycle/spec status value, for display only."""
+    match = DECLARED_RE.search(text)
+    if match is None:
+        return None
+    rest = match.group(1).strip()
+    token = re.match(r"^`([^`]*)`", rest)
+    if token is not None:
+        return token.group(1).strip() or None
+    rest = rest.split("<!--", 1)[0].strip().strip("`").strip()
+    return rest or None
+
+
+def scope_payload(text: str | None) -> dict | None:
+    if text is None:
+        return None
+    report = spec_scope.scope_report(text)
+    if not report.present:
+        return None
+    if report.errors:
+        return {"invalid": True, "errors": list(report.errors)}
+    return {"allow": list(report.scope.allow), "deny": list(report.scope.deny)}
+
+
+def read_evidence(root: Path, check_id: str, digest: str | None, head: str | None) -> dict:
+    """Evidence fields for one check, including the GOV-4 staleness verdict."""
+    path = root / VERIFY_REL / f"{check_id}.json"
+    rel = (VERIFY_REL / f"{check_id}.json").as_posix()
+    result = {
+        "evidence": None,
+        "hash_matches": False,
+        "exit_code": None,
+        "passing": False,
+        "present": False,
+        "stale": True,
+        "git_head": None,
+        "tree_dirty": None,
+        "scope_sha256": None,
+    }
+    if not path.is_file():
+        return result
+    result["evidence"] = rel
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return result
+    if not isinstance(data, dict):
+        return result
+    record_digest = data.get("spec_sha256")
+    exit_code = data.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        exit_code = None
+    ev_head = data.get("git_head")
+    ev_dirty = data.get("tree_dirty")
+    ev_scope = data.get("scope_sha256")
+    result["exit_code"] = exit_code
+    result["git_head"] = ev_head if isinstance(ev_head, str) else None
+    result["tree_dirty"] = ev_dirty if isinstance(ev_dirty, bool) else None
+    result["scope_sha256"] = ev_scope if isinstance(ev_scope, str) else None
+    hash_matches = isinstance(record_digest, str) and digest is not None and record_digest == digest
+    # Missing field / different revision / dirty tree -> stale (the goal, not a bug).
+    stale = not isinstance(ev_head, str) or head is None or ev_head != head or ev_dirty is not False
+    result["hash_matches"] = hash_matches
+    result["present"] = hash_matches
+    result["stale"] = stale
+    result["passing"] = hash_matches and exit_code == 0 and not stale
+    return result
+
+
+def derive_state(has_spec: bool, has_approval: bool, checks: list[dict]) -> str:
+    if not has_spec:
+        return "INTAKE"
+    if not has_approval:
+        return "SPEC_DESIGN"
+    if not checks:
+        return "APPROVED"
+    if all(check["passing"] for check in checks):
+        return "DONE"
+    if any(check["present"] for check in checks):
+        return "VERIFY"
+    return "APPROVED"
+
+
+def build_report(root: Path, spec: Path, head: str | None, dirty: bool) -> dict:
+    """One report. Non-contracts have ``state: null`` and no checks (GOV-7)."""
+    spec = spec.resolve()
+    digest: str | None = None
+    text: str | None = None
+    try:
+        payload = spec.read_bytes()
+        digest = spec_scope.sha256_hex(payload)
+        text = payload.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        digest = None
+        text = None
+    kind = "undeclared" if text is None else spec_scope.classify(text)
+    active = spec_scope.is_active_spec(root, spec)
+    report = {
+        "state": None,
+        "spec": str(spec),
+        "slug": spec.stem,
+        "role": kind,
+        "active": active,
+        "spec_sha256": digest,
+        "approval_record": None,
+        "declared": declared_state(text) if text is not None else None,
+        "scope": scope_payload(text),
+        "worktree": {"head": head, "dirty": dirty},
+        "checks": [],
+        "derived_at": now_iso(),
+    }
+    if kind != "spec":
+        return report  # index / undeclared: never a contract, no state, no dod
+
+    approval_path, _record = spec_scope.find_valid_approval(root, spec)
+    if active and approval_path is not None:
+        report["approval_record"] = str(approval_path)
+    checks: list[dict] = []
+    if text is not None:
+        for declared_check in parse_dod_checks(text):
+            evidence = read_evidence(root, declared_check["id"], digest, head)
+            checks.append(
+                {
+                    "id": declared_check["id"],
+                    "cmd": declared_check["cmd"],
+                    "evidence": evidence["evidence"],
+                    "hash_matches": evidence["hash_matches"],
+                    "exit_code": evidence["exit_code"],
+                    "passing": evidence["passing"],
+                    "present": evidence["present"],
+                    "stale": evidence["stale"],
+                    "git_head": evidence["git_head"],
+                    "tree_dirty": evidence["tree_dirty"],
+                    "scope_sha256": evidence["scope_sha256"],
+                }
+            )
+    report["checks"] = checks
+    report["state"] = derive_state(True, report["approval_record"] is not None, checks)
+    return report
+
+
+def extract_dod_block(text: str) -> str | None:
+    """Body of the first fenced block whose info string is exactly ``dod``."""
+    return spec_scope.parse_fences(text).get("dod")
+
+
+def parse_dod_checks(text: str) -> list[dict]:
+    """Parse the ``dod`` fence into [{'id','cmd'}, ...]; [] when absent."""
+    body = extract_dod_block(text)
+    if body is None:
+        return []
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        die(f"invalid 'dod' block JSON: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        die("'dod' block must be an object with a 'checks' array")
+    checks: list[dict] = []
+    seen: set[str] = set()
+    for entry in data["checks"]:
+        if not isinstance(entry, dict):
+            die(f"'dod' check entry is not an object: {entry!r}")
+        check_id = entry.get("id")
+        cmd = entry.get("cmd")
+        if not isinstance(check_id, str) or not check_id:
+            die("each 'dod' check needs a non-empty string 'id'")
+        if not isinstance(cmd, str):
+            die(f"'dod' check {check_id!r} needs a string 'cmd'")
+        if check_id in seen:
+            die(f"duplicate 'dod' check id: {check_id!r}")
+        seen.add(check_id)
+        checks.append({"id": check_id, "cmd": cmd})
+    return checks
+
+
+def render_table(checks: list[dict]) -> str:
+    if not checks:
+        return "checks      : (none declared)"
+    headers = ("id", "evidence", "hash", "exit", "stale")
+    rows: list[tuple[str, str, str, str, str]] = []
+    for check in checks:
+        evidence = check["evidence"] or "—"
+        if check["evidence"] is None:
+            hash_cell = "—"
+        else:
+            hash_cell = "yes" if check["hash_matches"] else "no"
+        exit_cell = str(check["exit_code"]) if check["exit_code"] is not None else "—"
+        stale_cell = "yes" if check["stale"] else "no" if check["evidence"] is not None else "—"
+        rows.append((check["id"], evidence, hash_cell, exit_cell, stale_cell))
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+    fmt = "  {:<%d}  {:<%d}  {:<%d}  {:<%d}  {:<%d}" % tuple(widths)
+    lines = ["checks (id | evidence | hash | exit | stale):", fmt.format(*headers)]
+    for row in rows:
+        lines.append(fmt.format(*row))
+    return "\n".join(lines)
+
+
+def print_human(report: dict) -> None:
+    if report["role"] != "spec":
+        state = "— (not a contract: no lifecycle state)"
+    else:
+        state = report["state"] or "—"
+    print(f"Derived state (read-only, no store): {state}")
+    print(
+        f"{'spec':<11}: {report['spec']} "
+        f"(role={report['role']}, active={'yes' if report['active'] else 'no'}, slug={report['slug']})"
+    )
+    print(f"{'spec sha256':<11}: {report['spec_sha256'] if report['spec_sha256'] else '—'}")
+    print(f"{'approval':<11}: {report['approval_record'] if report['approval_record'] else '—'}")
+    worktree = report["worktree"]
+    print(f"{'worktree':<11}: head={worktree['head'] or '—'} dirty={worktree['dirty']}")
+    declared = report["declared"]
+    if declared is None:
+        print(f"{'declared':<11}: —")
+    else:
+        print(f"{'declared':<11}: {declared} (display only, never authoritative)")
+    if report["role"] == "spec":
+        print(render_table(report["checks"]))
+    else:
+        print("checks      : (not a contract; the dod circuit does not apply)")
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
+
+    rest = list(args)
+    if rest and rest[0] == "show":
+        rest = rest[1:]
+    elif rest and rest[0] in ("set", "history", "r6", "advance"):
+        die(
+            f"unknown subcommand: {rest[0]!r}; spec-status is read-only and supports "
+            "only 'show' (try --help)"
+        )
+
+    as_json = False
+    path_arg: str | None = None
+    spec_arg: str | None = None
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--spec":
+            index += 1
+            if index >= len(rest):
+                die("--spec requires a value")
+            spec_arg = rest[index]
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif path_arg is None:
+            path_arg = arg
+        else:
+            die(f"unexpected argument: {arg}")
+        index += 1
+
+    start = resolve_start(path_arg)
+    explicit_spec: Path | None = None
+    if start.is_file():
+        root = find_root(start.parent)
+        if root is None:
+            die(f"no project root containing {SPEC_REL} above {start}")
+        root = root.resolve()
+        explicit_spec = start.resolve()
+        if not under_spec_dir(root, explicit_spec):
+            die(f"{explicit_spec} is not a spec under {root / SPEC_REL}")
+    else:
+        root = find_root(start)
+        if root is None:
+            die(f"no project root containing {SPEC_REL} at or above {start}")
+        root = root.resolve()
+
+    if explicit_spec is not None and spec_arg is not None:
+        die("give either a spec file path or --spec, not both")
+
+    head = spec_scope.git_head(root)
+    dirty = spec_scope.tree_dirty(root)
+
+    if explicit_spec is not None:
+        reports = [build_report(root, explicit_spec, head, dirty)]
+        non_contracts: list[tuple[str, Path]] = []
+    elif spec_arg is not None:
+        reports = [build_report(root, resolve_selector(root, spec_arg), head, dirty)]
+        non_contracts = []
+    else:
+        contracts, indexes, undeclared = spec_scope.specs_and_indexes(root)
+        reports = [build_report(root, spec, head, dirty) for spec in contracts]
+        non_contracts = [("index", spec) for spec in indexes] + [("undeclared", spec) for spec in undeclared]
+
+    if as_json:
+        print(json.dumps(reports, ensure_ascii=False, indent=2))
+        return 0
+
+    if not reports:
+        print("active contracts: none")
+    for position, report in enumerate(reports):
+        if position > 0:
+            print()
+        print_human(report)
+    for kind, spec in non_contracts:
+        if kind == "index":
+            print(f"index: {spec.name} (not a contract)")
+        else:
+            print(f"undeclared: {spec.name} (no status line)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

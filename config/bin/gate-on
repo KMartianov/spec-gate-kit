@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Re-enable the spec-gate for one project by removing the GATE-OFF marker.
+
+Usage:
+    gate-on [<path-inside-project>]
+
+Removes ``<root>/.slim/GATE-OFF``, where ``<root>`` is the nearest ancestor
+containing ``.slim/spec`` (the walk stops at a ``.git`` boundary, ``$HOME`` and
+``/``). Idempotent: an already-active gate reports so and exits 0.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+HOME = Path(os.path.expanduser("~"))
+SPEC_REL = Path(".slim") / "spec"
+MARKER_NAME = "GATE-OFF"
+
+USAGE = """Usage:
+    gate-on [<path-inside-project>] [--help]
+
+With no argument the current directory is used. Removes the escape-hatch marker
+``<root>/.slim/GATE-OFF`` so the spec-gate applies again. Idempotent.
+"""
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"gate-on: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def find_root(start: Path) -> Path | None:
+    """Nearest ancestor holding .slim/spec; bounded by .git, $HOME and /."""
+    directory = start if start.is_dir() else start.parent
+    while True:
+        if (directory / SPEC_REL).is_dir():
+            return directory
+        if (directory / ".git").exists():
+            return None
+        if directory == HOME or directory == directory.parent:
+            return None
+        directory = directory.parent
+
+
+def resolve_target(arg: str | None) -> Path:
+    if arg is None:
+        return Path.cwd().resolve()
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    target = target.resolve()
+    if not target.exists():
+        die(f"path not found: {target}")
+    return target
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
+    if len(args) > 1:
+        die(f"unexpected argument: {args[1]}")
+
+    target = resolve_target(args[0] if args else None)
+    root = find_root(target)
+    if root is None:
+        die(f"no project root containing {SPEC_REL} at or above {target}")
+    root = root.resolve()
+
+    marker = root / ".slim" / MARKER_NAME
+    if marker.exists():
+        try:
+            marker.unlink()
+        except OSError as exc:
+            die(f"cannot remove marker {marker}: {exc}")
+        print(f"gate re-enabled: removed {marker}")
+    else:
+        print(f"gate already active: no marker at {marker}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

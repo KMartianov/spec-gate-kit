@@ -1,0 +1,616 @@
+#!/usr/bin/env python3
+"""Record a human approval of a spec for the spec-gate plugin (HUMAN-ONLY).
+
+Usage:
+    spec-approve [<slug>|<path/to/spec.md>|<dir>] [--all] [--changed] [--list]
+                 [--restamp] [--strict] [--approvals-dir PATH] [--help]
+
+A spec is a ``*.md`` file directly in ``<root>/.slim/spec`` whose declared
+status line carries a token outside the reserved ``{roadmap, index}`` set
+(GOV-7).  Approving one flips its status token to ``approved``, inserts a
+``- **Утверждено:** <ISO8601> (human)`` line, and records the sha256 of the
+*resulting* content (flip-before-hash is a hard invariant: the plugin compares
+the record against the current spec bytes).  Readers match a record by its
+``spec`` path and ``spec_sha256``, never by filename.
+
+The tool is the only writer of approval records; every write is atomic and
+readback-verified.  Re-approving an unchanged spec rewrites only the record,
+never the spec, so existing ``verify/<id>.json`` evidence (GOV-4) stays valid.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec_scope  # noqa: E402  (shared governance semantics)
+
+SPEC_REL = spec_scope.SPEC_REL
+
+USAGE = """Usage:
+    spec-approve [<slug>|<path/to/spec.md>|<dir>] [--all] [--changed] [--list]
+                 [--restamp] [--strict] [--approvals-dir PATH] [--help]
+
+Record a human approval of a spec for the spec-gate plugin. Only active
+contracts (``*.md`` directly in ``<root>/.slim/spec``, declared token outside
+``{roadmap, index}``) can be approved; indexes, undeclared files and
+``archive/**`` are refused fail-closed (GOV-3/GOV-6/GOV-7).
+
+Target:
+  <slug>            a spec slug; resolved as cwd/<slug>, cwd/.slim/spec/<slug>,
+                    cwd/.slim/spec/<slug>.md, then up the ancestor chain
+  <path/to.md>      a spec file path (absolute or relative to cwd)
+  <dir>             a directory: its ``*.md`` files (one unless --all)
+  (none)            same as --list
+
+Modes/flags:
+  --all             approve every active contract of the current project;
+                    indexes/undeclared are skipped (not a contract)
+  --changed         like --all, but skip specs that already have a valid record
+  --list            print a read-only table; never writes (default with no target)
+  --restamp         on an already-approved spec, rewrite the stamp; WARNING: the
+                    evidence for this spec becomes stale (DONE may drop to VERIFY)
+  --strict          treat scope/dod problems as refusals (exit 2) instead of warnings
+  --approvals-dir PATH
+                    approvals store to read AND write (env fallback:
+                    OPENCODE_APPROVALS_DIR); default ~/.local/share/opencode/approvals
+  -h, --help        show this help
+
+Exit codes:
+  0  success (including --list; nothing refused in --all/--changed)
+  1  input/resolution error, or a post-write gate confirmation failed
+  2  refused: wrong class (index/undeclared), inactive location (archive),
+     outside .slim/spec, or a --strict scope/dod violation; nothing written
+  3  partial success in --all/--changed (some approved, some refused)
+"""
+
+STATUS_TOKEN_RE = re.compile(r"`[^`]*`|'[^']*'|\"[^\"]*\"|[^\s`'\"]+")
+APPROVED_LINE_RE = re.compile(
+    r"^[ \t]*-[ \t]*\*\*Утверждено:\*\*.*$", re.MULTILINE
+)
+
+
+class Fatal(Exception):
+    """Unrecoverable error: print and exit (never inside bulk per-spec handling)."""
+
+    def __init__(self, message: str, code: int = 1) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+@dataclass
+class Outcome:
+    kind: str  # "approved" | "unchanged" | "refused"
+    digest: str | None = None
+    message: str = ""
+    gate: str = "no-approval"  # "allow" | "no-mandate" | "no-approval"
+    gate_msg: str = ""
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"spec-approve: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def warn(message: str) -> None:
+    print(f"spec-approve: warning: {message}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Filesystem helpers
+# ---------------------------------------------------------------------------
+
+
+def resolve_path(arg: str) -> Path:
+    """Resolve the positional argument, or die listing the available slugs."""
+    cwd = Path.cwd()
+    raw = Path(arg).expanduser()
+    md = Path(arg + ".md")
+    candidates: list[Path] = [
+        raw if raw.is_absolute() else cwd / raw,
+        cwd / SPEC_REL / raw,
+        cwd / SPEC_REL / md,
+    ]
+    for ancestor in (cwd, *cwd.parents):
+        candidates.append(ancestor / SPEC_REL / raw)
+        candidates.append(ancestor / SPEC_REL / md)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    root = spec_scope.find_root(cwd)
+    slugs = [p.stem for p in spec_scope.spec_files(root)] if root is not None else []
+    available = ", ".join(slugs) if slugs else "none"
+    die(f"no spec matches {arg!r}; available slugs: {available}")
+    raise AssertionError("unreachable")  # die() raises
+
+
+def expand_dir(hit: Path) -> list[Path]:
+    """A file resolves to itself; a directory to its ``*.md`` files."""
+    if hit.is_dir():
+        return sorted(p for p in hit.iterdir() if p.is_file() and p.suffix == ".md")
+    return [hit]
+
+
+def resolve_approvals_dir(opt: str | None) -> Path:
+    if opt is not None:
+        return Path(opt).expanduser()
+    env = os.environ.get("OPENCODE_APPROVALS_DIR")
+    if env:
+        return Path(env).expanduser()
+    return spec_scope.APPROVALS_DIR
+
+
+# ---------------------------------------------------------------------------
+# Atomic writes
+# ---------------------------------------------------------------------------
+
+
+def atomic_write(target: Path, payload: bytes) -> None:
+    """``spec_scope.atomic_write`` with the ``Fatal`` error contract of this CLI."""
+    try:
+        spec_scope.atomic_write(target, payload)
+    except OSError as exc:
+        raise Fatal(f"cannot write {target}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Approval record store
+# ---------------------------------------------------------------------------
+
+
+def _iter_records(record_dir: Path):
+    """Yield ``(record_file, record_or_None, resolved_spec_or_None)``."""
+    if not record_dir.is_dir():
+        return
+    for record_file in sorted(record_dir.glob("*.json")):
+        try:
+            data = json.loads(record_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            yield record_file, None, None
+            continue
+        if not isinstance(data, dict):
+            yield record_file, None, None
+            continue
+        raw = data.get("spec")
+        resolved: Path | None = None
+        if isinstance(raw, str):
+            try:
+                resolved = Path(raw).expanduser().resolve()
+            except OSError:
+                resolved = None
+        yield record_file, data, resolved
+
+
+def write_record(
+    root: Path, spec: Path, digest: str, stamp: str, approvals_dir: Path
+) -> Path:
+    """Write the approval record; migrate a legacy same-spec name, never clobber others."""
+    out_dir = approvals_dir / spec_scope.root_hash(root)
+    slug = spec_scope.slugify(spec)
+    target = out_dir / f"{spec_scope.sha256_hex(str(spec).encode('utf-8'))[:16]}-{slug}.json"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise Fatal(f"cannot create approvals directory {out_dir}: {exc}") from exc
+
+    ours = spec.resolve()
+    for record_file, _data, resolved in _iter_records(out_dir):
+        if record_file == target:
+            if resolved is not None and resolved == ours:
+                continue  # our own record: atomically overwritten below
+            raise Fatal(
+                f"refusing to overwrite approval record for a different spec: {record_file}"
+            )
+        if resolved is not None and resolved == ours:
+            # Same spec under a different (legacy) filename: migrate it away.
+            try:
+                record_file.unlink()
+            except OSError as exc:
+                raise Fatal(f"cannot remove legacy approval record {record_file}: {exc}") from exc
+            print(f"migrated legacy record: {record_file}")
+
+    record = {
+        "root": str(root),
+        "spec": str(spec),
+        "spec_sha256": digest,
+        "task": slug,
+        "approved_by": "human",
+        "approved_at": stamp,
+    }
+    payload = (json.dumps(record, indent=2) + "\n").encode("utf-8")
+    atomic_write(target, payload)
+    return target
+
+
+# ---------------------------------------------------------------------------
+# Status-line flip (GOV-7)
+# ---------------------------------------------------------------------------
+
+
+def mark_approved(text: str, stamp: str) -> str:
+    """Flip the status token to ``approved`` and (re)write the Утверждено line."""
+    match = spec_scope.STATUS_RE.search(text)
+    if match is None:
+        raise Fatal("no 'Статус спецификации' line found; refusing to approve a non-spec file")
+    rest = match.group(1)
+    token = STATUS_TOKEN_RE.search(rest)
+    if token is None:
+        raise Fatal("no status token found on the 'Статус спецификации' line")
+    new_rest = rest[: token.start()] + "`approved`" + rest[token.end() :]
+    updated = text[: match.start(1)] + new_rest + text[match.end(1) :]
+
+    line = f"- **Утверждено:** {stamp} (human)"
+    if APPROVED_LINE_RE.search(updated):
+        return APPROVED_LINE_RE.sub(lambda _m: line, updated, count=1)
+    status = spec_scope.STATUS_RE.search(updated)
+    assert status is not None  # the line survived the token replacement
+    return updated[: status.end()] + "\n" + line + updated[status.end() :]
+
+
+# ---------------------------------------------------------------------------
+# Core approval flow
+# ---------------------------------------------------------------------------
+
+
+def confirm_gate(
+    root: Path, spec: Path, original_text: str, approvals_dir: Path
+) -> tuple[str, str]:
+    """Prove the record validates and report the mandate size (GOV-1)."""
+    _record_path, record = spec_scope.find_valid_approval(root, spec, approvals_dir)
+    if record is None:
+        return "no-approval", "gate: no-approval (the record did not validate)"
+    report = spec_scope.scope_report(original_text)
+    count = len(report.scope.allow) if report.scope is not None else 0
+    if count == 0:
+        return "allow", f"gate: allow via {spec.stem} (scope grants nothing)"
+    return "allow", f"gate: allow via {spec.stem} (scope grants {count} patterns)"
+
+
+def approve_one(
+    root: Path, spec: Path, *, restamp: bool, strict: bool, approvals_dir: Path
+) -> Outcome:
+    try:
+        payload = spec.read_bytes()
+    except OSError as exc:
+        raise Fatal(f"cannot read spec {spec}: {exc}") from exc
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Fatal(f"spec is not valid UTF-8: {spec}: {exc}") from exc
+
+    # Class / activity gate (GOV-3/GOV-6/GOV-7).
+    kind = spec_scope.classify(text)
+    if kind == "index":
+        return Outcome(
+            "refused",
+            message=(
+                f"{spec.name} is an index (roadmap/index token), not a contract; "
+                "an approval would grant nothing (GOV-7)"
+            ),
+        )
+    if kind == "undeclared":
+        return Outcome(
+            "refused",
+            message=(
+                f"{spec.name} has no parseable 'Статус спецификации' line (undeclared); "
+                "fail-closed (GOV-7)"
+            ),
+        )
+    if not spec_scope.is_active_spec(root, spec):
+        return Outcome(
+            "refused",
+            message=(
+                f"{spec} is not an active spec (archive/retire-without-delete); "
+                "approvals never apply there (GOV-3/GOV-6)"
+            ),
+        )
+    if spec.resolve().parent != spec_scope.spec_dir(root).resolve():
+        return Outcome(
+            "refused",
+            message=(
+                f"{spec} is outside {spec_scope.spec_dir(root)}; only active "
+                "contracts can be approved (GOV-3)"
+            ),
+        )
+
+    # scope / dod validation (WARNING by default, refusal under --strict).
+    report = spec_scope.scope_report(text)
+    problems: list[str] = []
+    if not report.present:
+        problems.append("no 'scope' fence: the approval grants NOTHING (GOV-1, fail-closed)")
+    else:
+        if report.errors:
+            problems.append(
+                "invalid 'scope' fence: grants nothing: " + "; ".join(report.errors)
+            )
+        problems.extend(report.warnings)
+    if "dod" not in spec_scope.parse_fences(text):
+        problems.append("no 'dod' fence: the spec can never reach DONE")
+    if strict and problems:
+        return Outcome("refused", message="--strict: " + "; ".join(problems))
+    for problem in problems:
+        warn(problem)
+
+    # Approval semantics: flip-before-hash, never re-write an already-approved spec.
+    already = spec_scope.declared_token(text) == "approved" and bool(
+        APPROVED_LINE_RE.search(text)
+    )
+    stamp = spec_scope.now_iso()
+
+    if already and not restamp:
+        digest = spec_scope.sha256_hex(payload)
+        result_kind = "unchanged"
+    else:
+        if already and restamp:
+            warn(
+                f"--restamp rewrites the Утверждено stamp of {spec.name}; evidence "
+                "for this spec becomes stale and the state may drop from DONE to VERIFY"
+            )
+        updated = mark_approved(text, stamp)
+        if updated == text or spec_scope.declared_token(updated) != "approved":
+            raise Fatal(
+                "status flip did not apply; check the exact 'Статус спецификации' line format"
+            )
+        new_payload = updated.encode("utf-8")
+        digest = spec_scope.sha256_hex(new_payload)
+        atomic_write(spec, new_payload)
+        try:
+            readback = spec_scope.sha256_hex(spec.read_bytes())
+        except OSError as exc:
+            raise Fatal(f"cannot read back spec {spec}: {exc}") from exc
+        if readback != digest:
+            raise Fatal("refusing to record an unverifiable approval: readback mismatch")
+        result_kind = "approved"
+
+    write_record(root, spec, digest, stamp, approvals_dir)
+    gate, gate_msg = confirm_gate(root, spec, text, approvals_dir)
+    return Outcome(result_kind, digest=digest, gate=gate, gate_msg=gate_msg)
+
+
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
+
+
+def approval_status(root: Path, spec: Path, approvals_dir: Path) -> str:
+    """``valid`` | ``stale`` | ``none`` for one spec (read-only)."""
+    _record_path, record = spec_scope.find_valid_approval(root, spec, approvals_dir)
+    if record is not None:
+        return "valid"
+    record_dir = approvals_dir / spec_scope.root_hash(root)
+    ours = spec.resolve()
+    for _record_file, _data, resolved in _iter_records(record_dir):
+        if resolved is not None and resolved == ours:
+            return "stale"
+    return "none"
+
+
+def run_list(root: Path, specs: list[Path], approvals_dir: Path) -> int:
+    for spec in specs:
+        try:
+            payload = spec.read_bytes()
+            text: str | None = payload.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            payload = b""
+            text = None
+        if text is None:
+            print(f"{spec.stem}  undeclared  —  none  none  no-approval")
+            continue
+        kind = spec_scope.classify(text)
+        token = spec_scope.declared_token(text) or "—"
+        report = spec_scope.scope_report(text)
+        if not report.present:
+            scope_cell = "none"
+        elif report.errors:
+            scope_cell = "invalid"
+        else:
+            scope_cell = "ok"
+        digest = spec_scope.sha256_hex(payload)
+        approval = approval_status(root, spec, approvals_dir)
+        if approval != "valid":
+            gate_cell = "no-approval"
+        elif (
+            report.present
+            and not report.errors
+            and report.scope is not None
+            and len(report.scope.allow) > 0
+        ):
+            gate_cell = "allow"
+        else:
+            gate_cell = "no-mandate"
+        print(f"{spec.stem}  {kind}  {token}  {approval}  {scope_cell}  {gate_cell}")
+    return 0
+
+
+def run_single(root: Path, spec: Path, opts: dict, approvals_dir: Path) -> int:
+    try:
+        outcome = approve_one(
+            root,
+            spec,
+            restamp=opts["restamp"],
+            strict=opts["strict"],
+            approvals_dir=approvals_dir,
+        )
+    except Fatal as exc:
+        die(exc.message, exc.code)
+    if outcome.kind == "refused":
+        die(outcome.message, 2)
+    assert outcome.digest is not None
+    # Never claim success before the post-write gate confirmation succeeded: a
+    # failed confirmation prints only the gate error and exits 1.
+    if outcome.gate == "no-approval":
+        print(outcome.gate_msg, file=sys.stderr)
+        return 1
+    if outcome.kind == "unchanged":
+        print(f"already approved, unchanged (sha256 {outcome.digest[:12]})")
+    else:
+        print(f"approved {spec} (sha256 {outcome.digest[:12]})")
+    print(outcome.gate_msg)
+    return 0
+
+
+def run_bulk(root: Path, opts: dict, approvals_dir: Path) -> int:
+    approved = 0
+    unchanged = 0
+    refused = 0
+    for spec in spec_scope.spec_files(root):
+        try:
+            text = spec.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = None
+        kind = "undeclared" if text is None else spec_scope.classify(text)
+        if kind != "spec":
+            print(f"skipped {spec.stem} (not a contract)")
+            continue
+        if opts["changed"]:
+            _record_path, record = spec_scope.find_valid_approval(root, spec, approvals_dir)
+            if record is not None:
+                print(f"skipped {spec.stem} (unchanged)")
+                unchanged += 1
+                continue
+        try:
+            outcome = approve_one(
+                root,
+                spec,
+                restamp=opts["restamp"],
+                strict=opts["strict"],
+                approvals_dir=approvals_dir,
+            )
+        except Fatal as exc:
+            print(f"refused {spec.stem}: {exc.message}", file=sys.stderr)
+            refused += 1
+            continue
+        if outcome.kind == "refused":
+            print(f"refused {spec.stem}: {outcome.message}", file=sys.stderr)
+            refused += 1
+        elif outcome.kind == "unchanged":
+            assert outcome.digest is not None
+            print(f"unchanged {spec.stem} (sha256 {outcome.digest[:12]})")
+            unchanged += 1
+        else:
+            assert outcome.digest is not None
+            print(f"approved {spec.stem} (sha256 {outcome.digest[:12]})")
+            approved += 1
+
+    print(f"summary: approved {approved}, skipped {unchanged} (unchanged), refused {refused}")
+    if refused == 0:
+        return 0
+    if approved + unchanged == 0:
+        return 2
+    return 3
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def parse_args(args: list[str]) -> dict:
+    opts: dict = {
+        "help": False,
+        "positional": None,
+        "all": False,
+        "changed": False,
+        "list": False,
+        "restamp": False,
+        "strict": False,
+        "approvals_dir": None,
+    }
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("-h", "--help"):
+            opts["help"] = True
+        elif arg == "--all":
+            opts["all"] = True
+        elif arg == "--changed":
+            opts["changed"] = True
+        elif arg == "--list":
+            opts["list"] = True
+        elif arg == "--restamp":
+            opts["restamp"] = True
+        elif arg == "--strict":
+            opts["strict"] = True
+        elif arg == "--approvals-dir":
+            index += 1
+            if index >= len(args):
+                die("--approvals-dir requires a value")
+            opts["approvals_dir"] = args[index]
+        elif arg.startswith("--approvals-dir="):
+            opts["approvals_dir"] = arg.split("=", 1)[1]
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif opts["positional"] is None:
+            opts["positional"] = arg
+        else:
+            die(f"unexpected argument: {arg}")
+        index += 1
+    return opts
+
+
+def _main(argv: list[str]) -> int:
+    opts = parse_args(argv[1:])
+    if opts["help"]:
+        print(USAGE, end="")
+        return 0
+
+    positional = opts["positional"]
+    if positional is not None and (opts["all"] or opts["changed"]):
+        die("--all/--changed cannot be combined with a positional argument")
+    if opts["all"] and opts["changed"]:
+        die("give at most one of --all/--changed")
+    approvals_dir = resolve_approvals_dir(opts["approvals_dir"])
+
+    list_mode = opts["list"] or (
+        positional is None and not opts["all"] and not opts["changed"]
+    )
+    if list_mode:
+        if positional is not None:
+            hit = resolve_path(positional)
+            root = spec_scope.find_root(hit)
+            if root is None:
+                die(f"no project root containing {SPEC_REL} at or above {hit}")
+            return run_list(root.resolve(), expand_dir(hit), approvals_dir)
+        root = spec_scope.find_root(Path.cwd())
+        if root is None:
+            die(f"no project root containing {SPEC_REL} at or above {Path.cwd()}")
+        root = root.resolve()
+        return run_list(root, spec_scope.spec_files(root), approvals_dir)
+
+    if opts["all"] or opts["changed"]:
+        root = spec_scope.find_root(Path.cwd())
+        if root is None:
+            die(f"no project root containing {SPEC_REL} at or above {Path.cwd()}")
+        return run_bulk(root.resolve(), opts, approvals_dir)
+
+    hit = resolve_path(positional)
+    root = spec_scope.find_root(hit)
+    if root is None:
+        die(
+            f"{hit} is outside any project root containing {SPEC_REL}; only active "
+            "contracts can be approved (GOV-3)",
+            2,
+        )
+    specs = expand_dir(hit)
+    if len(specs) != 1:
+        die(f"expected exactly one spec for {positional!r}, found {len(specs)}")
+    return run_single(root.resolve(), specs[0], opts, approvals_dir)
+
+
+def main(argv: list[str]) -> int:
+    try:
+        return _main(argv)
+    except Fatal as exc:
+        die(exc.message, exc.code)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

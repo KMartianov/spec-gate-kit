@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""Lint the Diátaxis/ADR documentation framework of a gated project.
+
+Usage:
+    docs-lint [<path-inside-project>] [--spec <slug|path>] [--json] [--quiet]
+
+Classification (GOV-7) drives which checks apply to each ``*.md`` file directly
+in ``.slim/spec/`` (non-recursive; ``archive/**`` is an inactive zone and is
+never linted, GOV-6):
+
+* contract (any declared status token outside ``roadmap``/``index``):
+  the status line must exist, at least one concrete ``docs/adr/NNNN-*.md`` ADR
+  must be referenced and exist, every ``docs/...`` path must resolve, a missing
+  machine-readable ``dod`` fenced block is a WARNING (``bin/dod-run`` cannot
+  record evidence), and the machine-readable ``scope`` fence is validated: a
+  missing fence or an empty ``allow``/missing key/unknown key is a WARNING,
+  while broken JSON, wrong types or unsafe patterns (absolute, ``~``, ``\\``,
+  ``..``, empty) are an ERROR because the gate then grants no mandate.
+* index (``roadmap``/``index`` token): NOT a contract — no contract checks, and
+  a ``scope`` fence on it is reported as WARNING ``scope-ignored``.
+* undeclared (no status line at all): exactly one ERROR, the missing status
+  line; contract checks do not apply (fail-closed).
+
+The five Diátaxis/ADR directories must exist; a quadrant holding nothing but its
+own ``README.md`` is a warning. The project root is the nearest ancestor
+containing ``.slim/spec`` (the walk stops at a ``.git`` boundary, ``$HOME`` and
+``/``). Exit 1 if any ERROR is found, else 0.
+
+Duplicate ``dod`` check ids are an ERROR: ``bin/dod-run`` writes evidence flat to
+``<root>/verify/<id>.json`` with no per-spec namespace, so an id may belong to
+only one contract (a repeated id within one contract is an ERROR too). With
+``--spec <slug|path>`` only that one contract is linted and only the duplicates
+involving it are reported.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # stay strictly read-only (I-6)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec_scope  # noqa: E402  (shared governance semantics)
+
+HOME = Path(os.path.expanduser("~"))
+SPEC_REL = spec_scope.SPEC_REL
+
+USAGE = """Usage:
+    docs-lint [<path-inside-project>] [--spec <slug|path>] [--json] [--quiet] [--help]
+
+With no argument the current directory is used. Lints the Diátaxis/ADR
+documentation framework of the enclosing gated project. Exit 1 on any ERROR.
+
+  --spec <slug|path>  lint exactly one contract and report only the duplicate
+                      ``dod`` check ids that involve it. A bare slug resolves
+                      against <root>/.slim/spec/<slug>[.md], then as a path.
+"""
+
+DIATAXIS_DIRS = (
+    "docs/tutorials",
+    "docs/how-to",
+    "docs/reference",
+    "docs/explanation",
+    "docs/adr",
+)
+# Only the four Diátaxis quadrants are "empty quadrant" warnings; docs/adr is a
+# numbered decision log, not a quadrant.
+DIATAXIS_QUADRANTS = (
+    "docs/tutorials",
+    "docs/how-to",
+    "docs/reference",
+    "docs/explanation",
+)
+
+ADR_REF_RE = re.compile(r"docs/adr/\d+-[A-Za-z0-9._\-]+\.md")
+DOCS_REF_RE = re.compile(r"(?<![\w/])docs/[A-Za-z0-9._/\-]+")
+TRAILING = "/.,;:)]}`'\""
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"docs-lint: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def find_root(start: Path) -> Path | None:
+    """Nearest ancestor holding .slim/spec; bounded by .git, $HOME and /."""
+    directory = start if start.is_dir() else start.parent
+    while True:
+        if (directory / SPEC_REL).is_dir():
+            return directory
+        if (directory / ".git").exists():
+            return None
+        if directory == HOME or directory == directory.parent:
+            return None
+        directory = directory.parent
+
+
+def resolve_target(arg: str | None) -> Path:
+    if arg is None:
+        return Path.cwd().resolve()
+    target = Path(arg).expanduser()
+    if not target.is_absolute():
+        target = Path.cwd() / target
+    target = target.resolve()
+    if not target.exists():
+        die(f"path not found: {target}")
+    return target
+
+
+def resolve_spec(root: Path, arg: str) -> Path:
+    """Resolve a ``--spec`` argument: a bare slug or a path.
+
+    A bare slug is tried as ``<root>/.slim/spec/<slug>``, then as
+    ``<root>/.slim/spec/<slug>.md``, then as a path relative to cwd (with and
+    without an appended ``.md``); an absolute argument is used as a path.  On a
+    miss the available slugs are listed and the process exits nonzero.
+    """
+    spec_dir = root / SPEC_REL
+    raw = Path(arg).expanduser()
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.extend([raw, Path(str(raw) + ".md")])
+    else:
+        candidates.extend(
+            [
+                spec_dir / raw,
+                spec_dir / Path(str(raw) + ".md"),
+                Path.cwd() / raw,
+                Path.cwd() / Path(str(raw) + ".md"),
+            ]
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    slugs = [p.stem for p in spec_scope.spec_files(root)]
+    available = ", ".join(slugs) if slugs else "none"
+    die(f"no spec matches {arg}; available: {available}")
+    raise AssertionError("unreachable")  # die() raises
+
+
+def unique(items: list[str]) -> list[str]:
+    """Order-preserving de-duplication."""
+    return list(dict.fromkeys(items))
+
+
+def has_dod_block(text: str) -> bool:
+    """True when the spec has a fenced code block whose info string is exactly
+    ``dod`` (the block bin/dod-run parses)."""
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        opener = re.match(r"^[ \t]*(`{3,}|~{3,})[ \t]*(.*)$", lines[index])
+        if not opener:
+            index += 1
+            continue
+        fence = opener.group(1)
+        info = opener.group(2).strip()
+        cursor = index + 1
+        closed = False
+        while cursor < len(lines):
+            closer = re.match(r"^[ \t]*(`{3,}|~{3,})[ \t]*$", lines[cursor])
+            if closer and closer.group(1)[0] == fence[0] and len(closer.group(1)) >= len(fence):
+                closed = True
+                break
+            cursor += 1
+        if info == "dod":
+            return True
+        index = cursor + 1 if closed else cursor
+    return False
+
+
+def dod_check_ids(text: str) -> list[str]:
+    """Check ids declared by the ``dod`` fence, in order ([] when absent/invalid).
+
+    Only structurally usable entries contribute: a malformed body, a non-dict
+    root, a non-list ``checks`` or a missing/non-string ``id`` is ignored rather
+    than fatal (``bin/dod-run`` is the strict parser of this block).
+    """
+    body = spec_scope.parse_fences(text).get("dod")
+    if body is None:
+        return []
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    checks = data.get("checks")
+    if not isinstance(checks, list):
+        return []
+    ids: list[str] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        cid = check.get("id")
+        if isinstance(cid, str) and cid:
+            ids.append(cid)
+    return ids
+
+
+def spec_rel(root: Path, spec: Path) -> str:
+    """POSIX-relative display path for a spec, falling back to the absolute one."""
+    try:
+        return spec.relative_to(root).as_posix()
+    except ValueError:
+        return str(spec)
+
+
+def duplicate_dod_errors(root: Path, spec_filter: Path | None = None) -> list[dict]:
+    """ERRORs for duplicate ``dod`` check ids across (and within) contracts.
+
+    ``bin/dod-run`` stores evidence flat in ``<root>/verify/<id>.json`` with no
+    per-spec namespace, so an id may belong to only one contract: two contracts
+    that declare the same id overwrite each other's evidence and one of them can
+    never reach DONE (the project convention is to prefix ids per spec, e.g.
+    ``bsb_build``).  A repeated id *within* one contract is an ERROR too.  An id
+    declared by a spec without a ``dod`` fence cannot exist here by construction.
+    With ``spec_filter`` only the duplicates involving that spec are returned
+    (the ``--spec`` mode), so an author can see collisions before approval.
+    """
+    contracts = spec_scope.active_specs(root)
+    selected = spec_filter.resolve() if spec_filter is not None else None
+    if selected is not None and not any(spec.resolve() == selected for spec in contracts):
+        contracts = [*contracts, selected]
+
+    entries: list[tuple[Path, str, list[str]]] = []
+    for spec in contracts:
+        text = spec_scope.read_text(spec)
+        if text is None:
+            continue
+        entries.append((spec, spec_rel(root, spec), dod_check_ids(text)))
+
+    errors: list[dict] = []
+
+    # (a) an id repeated within one contract.
+    for spec, rel, ids in entries:
+        if selected is not None and spec.resolve() != selected:
+            continue
+        counts: dict[str, int] = {}
+        for cid in ids:
+            counts[cid] = counts.get(cid, 0) + 1
+        for cid in unique(ids):
+            if counts[cid] > 1:
+                errors.append(
+                    {
+                        "file": rel,
+                        "check": "dod-duplicate",
+                        "message": (
+                            f"dod check id {cid!r} is declared {counts[cid]} times in this spec; "
+                            "each check id must be unique within a contract"
+                        ),
+                    }
+                )
+
+    # (b) the same id declared by two different contracts.
+    holders: dict[str, list[tuple[Path, str]]] = {}
+    for spec, rel, ids in entries:
+        for cid in unique(ids):
+            holders.setdefault(cid, []).append((spec, rel))
+    for cid, rows in holders.items():
+        if len(rows) < 2:
+            continue
+        if selected is not None and all(spec.resolve() != selected for spec, _rel in rows):
+            continue
+        names = ", ".join(rel for _spec, rel in rows)
+        errors.append(
+            {
+                "file": rows[0][1],
+                "check": "dod-duplicate",
+                "message": (
+                    f"dod check id {cid!r} is declared by {len(rows)} contracts ({names}); "
+                    f"bin/dod-run stores evidence flat in verify/{cid}.json, so one contract "
+                    "overwrites the other's evidence and can never reach DONE — prefix ids "
+                    "per spec (e.g. bsb_build)"
+                ),
+            }
+        )
+    return errors
+
+
+def lint_spec(root: Path, spec: Path, errors: list[dict], warnings: list[dict]) -> None:
+    rel = spec.relative_to(root).as_posix() if root in spec.parents else str(spec)
+    try:
+        text = spec.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append({"file": rel, "check": "spec-read", "message": f"cannot read spec: {exc}"})
+        return
+    except UnicodeDecodeError as exc:
+        errors.append({"file": rel, "check": "spec-read", "message": f"spec is not valid UTF-8: {exc}"})
+        return
+
+    kind = spec_scope.classify(text)
+
+    # GOV-7: undeclared files get exactly one ERROR (the missing status line);
+    # contract checks (ADR, docs paths, dod, scope) do not apply to them.
+    if kind == "undeclared":
+        errors.append(
+            {
+                "file": rel,
+                "check": "spec-status",
+                "message": "missing '- **Статус спецификации:**' line",
+            }
+        )
+        return
+
+    scope = spec_scope.scope_report(text)
+
+    # GOV-7: an index is not a contract — zero ERRORs; the only WARNING it may
+    # carry is the ignored scope fence.
+    if kind == "index":
+        if scope.present:
+            warnings.append(
+                {
+                    "file": rel,
+                    "check": "scope-ignored",
+                    "message": "scope fence is ignored on a non-contract (index) file",
+                }
+            )
+        return
+
+    # --- contract checks -----------------------------------------------------
+    # 1b. A machine-readable dod block lets bin/dod-run record evidence. Its
+    # absence is a warning, never an error, so existing specs stay valid.
+    if not has_dod_block(text):
+        warnings.append(
+            {
+                "file": rel,
+                "check": "dod-block",
+                "message": "spec has no machine-readable dod block; bin/dod-run cannot record evidence",
+            }
+        )
+
+    # 2. At least one concrete ADR reference, and every referenced ADR must exist.
+    adr_refs = unique(ADR_REF_RE.findall(text))
+    if not adr_refs:
+        errors.append(
+            {
+                "file": rel,
+                "check": "adr-reference",
+                "message": "no concrete docs/adr/<NNNN>-*.md reference",
+            }
+        )
+    for ref in adr_refs:
+        if not (root / ref).is_file():
+            errors.append(
+                {
+                    "file": rel,
+                    "check": "adr-reference",
+                    "message": f"references missing ADR file: {ref}",
+                }
+            )
+
+    # 3. Every docs/... relative path a spec mentions must exist on disk.
+    for ref in unique(m.rstrip(TRAILING) for m in DOCS_REF_RE.findall(text)):
+        if ref and not (root / ref).exists():
+            errors.append(
+                {
+                    "file": rel,
+                    "check": "docs-path",
+                    "message": f"references missing path: {ref}",
+                }
+            )
+
+    # 4. Machine-readable scope fence (GOV-1): broken -> no mandate -> ERROR;
+    # absent/empty/incomplete -> still no mandate, but only a WARNING.
+    if not scope.present:
+        warnings.append(
+            {
+                "file": rel,
+                "check": "scope",
+                "message": (
+                    "spec has no machine-readable 'scope' fence; the gate grants no "
+                    "mandate for it (fail-closed)"
+                ),
+            }
+        )
+    else:
+        for message in scope.errors:
+            errors.append({"file": rel, "check": "scope", "message": f"invalid scope fence: {message}"})
+        for message in scope.warnings:
+            warnings.append({"file": rel, "check": "scope", "message": message})
+
+
+def lint_dirs(root: Path, errors: list[dict], warnings: list[dict]) -> None:
+    # 4. All five framework directories must exist.
+    for rel in DIATAXIS_DIRS:
+        if not (root / rel).is_dir():
+            errors.append(
+                {
+                    "file": rel,
+                    "check": "diataxis-dirs",
+                    "message": f"missing required directory: {rel}",
+                }
+            )
+    for rel in DIATAXIS_QUADRANTS:
+        directory = root / rel
+        if directory.is_dir():
+            entries = list(directory.iterdir())
+            if entries and all(entry.name == "README.md" for entry in entries):
+                warnings.append(
+                    {
+                        "file": rel,
+                        "check": "diataxis-dirs",
+                        "message": f"{rel} contains nothing but README.md",
+                    }
+                )
+
+
+def lint(root: Path) -> tuple[list[dict], list[dict]]:
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    spec_dir = root / SPEC_REL
+    if spec_dir.is_dir():
+        # GOV-6: `.slim/spec/**` is scanned NON-RECURSIVELY and the
+        # `parent == spec_dir` filter is explicit and normative: `archive/**`
+        # is an inactive zone (retire without delete), so archived specs are
+        # never linted (their broken ADR refs must not stay red forever).
+        # Regression: tools/gov/docs_lint_check.py (N8).
+        for spec in sorted(
+            (p for p in spec_dir.iterdir() if p.is_file() and p.suffix == ".md" and p.parent == spec_dir),
+            key=lambda p: p.name,
+        ):
+            lint_spec(root, spec, errors, warnings)
+    # Project-wide: no two contracts may share (or repeat) a dod check id.
+    errors.extend(duplicate_dod_errors(root))
+    lint_dirs(root, errors, warnings)
+    return errors, warnings
+
+
+def emit(root: Path, errors: list[dict], warnings: list[dict], as_json: bool, quiet: bool) -> int:
+    """Print the report (unless ``--quiet`` with no errors) and return the code."""
+    if quiet and not errors:
+        return 0
+    if as_json:
+        report = {"root": str(root), "errors": errors, "warnings": warnings}
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        for err in errors:
+            print(f"ERROR: {err['file']}: [{err['check']}] {err['message']}")
+        for warn in warnings:
+            print(f"WARN: {warn['file']}: [{warn['check']}] {warn['message']}")
+    return 1 if errors else 0
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
+
+    as_json = False
+    quiet = False
+    path_arg: str | None = None
+    spec_arg: str | None = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--json":
+            as_json = True
+        elif arg == "--quiet":
+            quiet = True
+        elif arg == "--spec":
+            index += 1
+            if index >= len(args):
+                die("--spec requires a value")
+            spec_arg = args[index]
+        elif arg.startswith("--spec="):
+            spec_arg = arg.split("=", 1)[1] or None
+            if spec_arg is None:
+                die("--spec requires a value")
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif path_arg is None:
+            path_arg = arg
+        else:
+            die(f"unexpected argument: {arg}")
+        index += 1
+
+    target = resolve_target(path_arg)
+    root = find_root(target)
+    if root is None:
+        die(f"no project root containing {SPEC_REL} at or above {target}")
+    root = root.resolve()
+
+    # --spec <slug|path>: lint exactly one contract and only the duplicate dod
+    # check ids that involve it (the pre-approval collision check).
+    if spec_arg is not None:
+        spec = resolve_spec(root, spec_arg)
+        errors: list[dict] = []
+        warnings: list[dict] = []
+        lint_spec(root, spec, errors, warnings)
+        errors.extend(duplicate_dod_errors(root, spec_filter=spec))
+        return emit(root, errors, warnings, as_json, quiet)
+
+    errors, warnings = lint(root)
+    return emit(root, errors, warnings, as_json, quiet)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

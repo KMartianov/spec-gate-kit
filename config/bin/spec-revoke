@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Revoke a previously recorded human approval for a project spec.
+
+Usage:
+    spec-revoke [<slug>|<path/to/spec.md>|<dir>] [--all] [--list]
+                [--approvals-dir PATH] [--help]
+
+With no positional argument every active contract of the current project's root
+is revoked (``--all`` is the explicit alias).  The tool removes the approval
+record(s) that belong to the selected spec(s) and flips the spec status line
+back to ``draft``, dropping the ``- **Утверждено:**`` line.
+
+A record belongs to a spec iff its resolved ``spec`` path equals the resolved
+target spec -- **never** by filename.  Readers (``spec_scope.find_valid_approval``)
+match a record by the ``spec`` path plus ``spec_sha256`` of the current bytes; a
+record left behind for another spec is simply ignored, while deleting a foreign
+record would silently block that spec (no-approval).
+
+Reverting changes the spec bytes, so any ``verify/*.json`` evidence (GOV-4) for
+that spec becomes stale and the derived state drops (DONE -> VERIFY).  Evidence
+is never deleted here.
+
+The project root is the nearest ancestor containing ``.slim/spec`` (the walk
+stops at a ``.git`` boundary, ``$HOME`` and ``/``).
+
+Exit codes:
+  0  success (including ``--list``)
+  1  input/resolution error (unknown target, unreadable spec, ...)
+  2  the project has no ``.slim/spec`` root
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec_scope  # noqa: E402  (shared governance semantics)
+
+HOME = spec_scope.HOME
+APPROVALS_DIR = spec_scope.APPROVALS_DIR
+SPEC_REL = spec_scope.SPEC_REL
+VERIFY_REL = spec_scope.VERIFY_REL
+
+USAGE = """Usage:
+    spec-revoke [<slug>|<path/to/spec.md>|<dir>] [--all] [--list]
+                [--approvals-dir PATH] [--help]
+
+Remove the approval record(s) that belong to a spec and return it to ``draft``.
+A record belongs to a spec iff its resolved ``spec`` path equals the resolved
+target spec (matched by path, never by filename); records of other specs are
+left byte-identical.
+
+Target:
+  <slug>            a spec slug; resolved as cwd/<slug>, cwd/.slim/spec/<slug>,
+                    cwd/.slim/spec/<slug>.md, then up the ancestor chain
+  <path/to.md>      a spec file path (absolute or relative to cwd)
+  <dir>             a directory: its ``*.md`` files
+  (none)            every active contract of the current project's root
+
+Modes/flags:
+  --all             alias for the no-argument default: revoke every active
+                    contract of the current project's root
+  --list            read-only preview: print the specs that would be revoked and
+                    the approval records that exist; writes nothing
+  --approvals-dir PATH
+                    approvals store to read AND delete from (env fallback:
+                    OPENCODE_APPROVALS_DIR); default ~/.local/share/opencode/approvals
+  -h, --help        show this help
+
+Exit codes:
+  0  success (including --list)
+  1  input/resolution error
+  2  no project root containing .slim/spec
+"""
+
+STATUS_APPROVED_RE = re.compile(
+    r"^([ \t]*-[ \t]*\*\*Статус спецификации:\*\*[ \t]*)`approved`(.*)$", re.MULTILINE
+)
+APPROVED_LINE_RE = re.compile(
+    r"^[ \t]*-[ \t]*\*\*Утверждено:\*\*[^\n]*\n?", re.MULTILINE
+)
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"spec-revoke: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def warn(message: str) -> None:
+    print(f"spec-revoke: warning: {message}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_target(arg: str) -> Path:
+    """Resolve the positional argument, or die listing the available slugs."""
+    cwd = Path.cwd()
+    raw = Path(arg).expanduser()
+    md = Path(arg + ".md")
+    candidates: list[Path] = [
+        raw if raw.is_absolute() else cwd / raw,
+        cwd / SPEC_REL / raw,
+        cwd / SPEC_REL / md,
+    ]
+    for ancestor in (cwd, *cwd.parents):
+        candidates.append(ancestor / SPEC_REL / raw)
+        candidates.append(ancestor / SPEC_REL / md)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    root = spec_scope.find_root(cwd)
+    slugs = [p.stem for p in spec_scope.spec_files(root)] if root is not None else []
+    available = ", ".join(slugs) if slugs else "none"
+    die(f"no spec matches {arg!r}; available slugs: {available}")
+    raise AssertionError("unreachable")  # die() raises
+
+
+def resolve_approvals_dir(opt: str | None) -> Path:
+    if opt is not None:
+        return Path(opt).expanduser()
+    env = os.environ.get("OPENCODE_APPROVALS_DIR")
+    if env:
+        return Path(env).expanduser()
+    return spec_scope.APPROVALS_DIR
+
+
+def expand_hit(hit: Path) -> list[Path]:
+    """A file resolves to itself; a directory to its ``*.md`` files."""
+    if hit.is_dir():
+        return sorted(
+            p.resolve() for p in hit.iterdir() if p.is_file() and p.suffix == ".md"
+        )
+    return [hit.resolve()]
+
+
+def load_records(rec_dir: Path) -> list[tuple[Path, dict | None, Path | None]]:
+    """Return ``(record_file, record_or_None, resolved_spec_or_None)`` tuples."""
+    out: list[tuple[Path, dict | None, Path | None]] = []
+    if not rec_dir.is_dir():
+        return out
+    for record_file in sorted(rec_dir.glob("*.json")):
+        try:
+            data = json.loads(record_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            out.append((record_file, None, None))
+            continue
+        if not isinstance(data, dict):
+            out.append((record_file, None, None))
+            continue
+        raw = data.get("spec")
+        resolved: Path | None = None
+        if isinstance(raw, str):
+            try:
+                resolved = Path(raw).expanduser().resolve()
+            except OSError:
+                resolved = None
+        out.append((record_file, data, resolved))
+    return out
+
+
+def mark_draft(text: str) -> str:
+    """Flip the status token back to `draft` and drop the Утверждено line."""
+    text = STATUS_APPROVED_RE.sub(lambda m: f"{m.group(1)}`draft`{m.group(2)}", text)
+    return APPROVED_LINE_RE.sub("", text)
+
+
+def evidence_for(root: Path, spec: Path) -> list[Path]:
+    """``verify/*.json`` evidence files whose recorded ``spec`` is this spec."""
+    out: list[Path] = []
+    verify_dir = root / VERIFY_REL
+    if not verify_dir.is_dir():
+        return out
+    target = spec.resolve()
+    for path in sorted(verify_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        raw = data.get("spec")
+        if not isinstance(raw, str):
+            continue
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if resolved == target:
+            out.append(path)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Modes
+# ---------------------------------------------------------------------------
+
+
+def run_list(
+    root: Path, specs: list[Path], records: list[tuple[Path, dict | None, Path | None]], rec_dir: Path
+) -> int:
+    spec_set = {spec.resolve() for spec in specs}
+    if not specs:
+        print("no specs to revoke")
+    for spec in specs:
+        text = spec_scope.read_text(spec)
+        token = spec_scope.declared_token(text) if text is not None else None
+        print(f"would revoke: {spec}  (status: {token or '—'})")
+    matching = [item for item in records if item[2] is not None and item[2] in spec_set]
+    if matching:
+        for record_file, _data, resolved in matching:
+            print(f"would remove approval record: {record_file}  ->  {resolved}")
+    else:
+        print(f"no approval records for the selected spec(s) under {rec_dir}")
+    foreign = len(records) - len(matching)
+    if foreign:
+        print(f"note: {foreign} record(s) in {rec_dir} belong to other specs (kept)")
+    return 0
+
+
+def run_revoke(
+    root: Path, specs: list[Path], records: list[tuple[Path, dict | None, Path | None]], rec_dir: Path
+) -> int:
+    spec_set = {spec.resolve() for spec in specs}
+
+    for spec in specs:
+        print(f"revoking spec: {spec}")
+
+    # --- delete only the records that positively belong to the target --------
+    removed_files: list[Path] = []
+    for record_file, _data, resolved in records:
+        if resolved is None or resolved not in spec_set:
+            continue
+        try:
+            record_file.unlink()
+        except OSError as exc:
+            die(f"cannot remove approval record {record_file}: {exc}")
+        removed_files.append(record_file)
+
+    removed_dir: Path | None = None
+    if rec_dir.is_dir():
+        try:
+            rec_dir.rmdir()  # succeeds only when now empty
+            removed_dir = rec_dir
+        except OSError:
+            removed_dir = None
+
+    # --- flip the selected specs back to draft -------------------------------
+    reverted: list[Path] = []
+    for spec in specs:
+        try:
+            original = spec.read_text(encoding="utf-8")
+        except OSError as exc:
+            die(f"cannot read spec {spec}: {exc}")
+        except UnicodeDecodeError as exc:
+            die(f"spec is not valid UTF-8: {spec}: {exc}")
+        updated = mark_draft(original)
+        if updated != original:
+            try:
+                spec_scope.atomic_write(spec, updated.encode("utf-8"))
+            except OSError as exc:
+                die(f"cannot write spec {spec}: {exc}")
+            reverted.append(spec)
+
+    # --- warn about evidence that the revert just invalidated ----------------
+    for spec in reverted:
+        evidence = evidence_for(root, spec)
+        if evidence:
+            names = ", ".join(sorted(p.name for p in evidence))
+            warn(
+                f"verify evidence exists for {spec.name} ({names}); reverting changed "
+                "the spec bytes, so the evidence is now stale and the state may drop "
+                "from DONE to VERIFY"
+            )
+
+    # --- summary -------------------------------------------------------------
+    if removed_files:
+        for record in removed_files:
+            print(f"removed approval record: {record}")
+        if removed_dir is not None:
+            print(f"removed empty approvals directory: {removed_dir}")
+    else:
+        print(f"no approval records found for root: {root}")
+    if reverted:
+        for spec in reverted:
+            print(f"reverted spec to draft: {spec}")
+    else:
+        print("specs already in draft (nothing to revert)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def parse_args(args: list[str]) -> dict:
+    opts: dict = {
+        "help": False,
+        "positional": None,
+        "all": False,
+        "list": False,
+        "approvals_dir": None,
+    }
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("-h", "--help"):
+            opts["help"] = True
+        elif arg == "--all":
+            opts["all"] = True
+        elif arg == "--list":
+            opts["list"] = True
+        elif arg == "--approvals-dir":
+            index += 1
+            if index >= len(args):
+                die("--approvals-dir requires a value")
+            opts["approvals_dir"] = args[index]
+        elif arg.startswith("--approvals-dir="):
+            opts["approvals_dir"] = arg.split("=", 1)[1]
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif opts["positional"] is None:
+            opts["positional"] = arg
+        else:
+            die(f"unexpected argument: {arg}")
+        index += 1
+    return opts
+
+
+def _resolve_selection(
+    opts: dict,
+) -> tuple[Path, list[Path]]:
+    """Return ``(root, target_specs)`` or die (1 input, 2 no root)."""
+    positional = opts["positional"]
+    if positional is not None:
+        hit = resolve_target(positional)
+        root = spec_scope.find_root(hit)
+        if root is None:
+            die(f"no project root containing {SPEC_REL} at or above {hit}", 2)
+        return root.resolve(), expand_hit(hit)
+
+    cwd = Path.cwd()
+    root = spec_scope.find_root(cwd)
+    if root is None:
+        die(f"no project root containing {SPEC_REL} at or above {cwd}", 2)
+    root = root.resolve()
+    return root, [p.resolve() for p in spec_scope.active_specs(root)]
+
+
+def _main(argv: list[str]) -> int:
+    opts = parse_args(argv[1:])
+    if opts["help"]:
+        print(USAGE, end="")
+        return 0
+    if opts["positional"] is not None and opts["all"]:
+        die("--all cannot be combined with a positional argument")
+
+    approvals_dir = resolve_approvals_dir(opts["approvals_dir"])
+    root, specs = _resolve_selection(opts)
+
+    rec_dir = approvals_dir / spec_scope.root_hash(root)
+    records = load_records(rec_dir)
+
+    if opts["list"]:
+        return run_list(root, specs, records, rec_dir)
+    return run_revoke(root, specs, records, rec_dir)
+
+
+def main(argv: list[str]) -> int:
+    return _main(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

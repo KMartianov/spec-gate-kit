@@ -1,0 +1,25 @@
+{
+  "reps": 10000,
+  "seed_base": "0",
+  "scenarios": [
+    "n4",
+    "n8",
+    "n16"
+  ],
+  "policies": [
+    "A",
+    "A_batch",
+    "B_perc",
+    "B",
+    "C",
+    "D",
+    "E",
+    "A+D",
+    "B+D",
+    "B+C",
+    "B+C+D",
+    "B+C+D+E"
+  ],
+  "params_file": "/home/asdcxfrt/Projects/spec-gate-kit/research/sim/params.json",
+  "seeds": "policy|scenario|rep|seed_base"
+}

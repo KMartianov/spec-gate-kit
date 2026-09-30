@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/v2/cli.json",
+  "plugins": [
+    "oh-my-opencode-slim",
+    "./plugins/token-tracker.tsx"
+  ],
+  "diffs": {
+    "wrap": "word"
+  },
+  "session": {
+    "sidebar": "auto",
+    "scrollbar": false,
+    "thinking": "show"
+  },
+  "animations": true
+}

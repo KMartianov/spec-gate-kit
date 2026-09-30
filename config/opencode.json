@@ -1,0 +1,383 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/deepseek-v4.1-flash",
+  "permission": {
+    "external_directory": {
+      "*": "deny",
+      "~/Projects/**": "allow",
+      "~/.config/opencode/**": "allow",
+      "/tmp/opencode/**": "allow",
+      "/home/asdcxfrt/ml_base/**": "allow"
+    },
+    "bash": {
+      "*": "ask",
+      "pwd": "allow",
+      "ls *": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git add *": "allow",
+      "git commit*": "allow",
+      "git branch*": "allow",
+      "git rev-parse*": "allow",
+      "cmake *": "allow",
+      "make *": "allow",
+      "ninja *": "allow",
+      "ctest *": "allow",
+      "pytest *": "allow",
+      "uv run*": "allow",
+      "uv sync*": "allow",
+      "python -m *": "allow",
+      "python3 -m *": "allow",
+      "sudo *": "deny",
+      "rm -rf /*": "deny",
+      "rm -rf ~/*": "deny",
+      "rm -rf /home/*": "deny",
+      "mkfs*": "deny",
+      "dd if=* of=/dev/*": "deny",
+      "chmod -R 777 *": "deny",
+      "sh -c *": "deny",
+      "bash -c *": "deny",
+      "eval *": "deny",
+      "git push --force*": "ask",
+      "git push -f*": "ask",
+      "git reset --hard*": "ask"
+    }
+  },
+  "provider": {
+    "openrouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OpenRouter (free)",
+      "options": {
+        "baseURL": "https://openrouter.ai/api/v1",
+        "apiKey": "{env:OPENROUTER_API_KEY}"
+      },
+      "models": {
+        "z-ai/glm-5.2:free": {
+          "name": "GLM 5.2 (free)"
+        },
+        "nvidia/nemotron-3-super-120b-a12b:free": {
+          "name": "Nemotron 3 Super 120B (free)"
+        },
+        "nvidia/nemotron-3-ultra-550b-a55b:free": {
+          "name": "Nemotron 3 Ultra 550B (free)"
+        },
+        "cohere/north-mini-code:free": {
+          "name": "Cohere North Mini Code (free)"
+        },
+        "google/gemma-4-31b-it:free": {
+          "name": "Gemma 4 31B (free)"
+        },
+        "google/gemma-4-26b-a4b-it:free": {
+          "name": "Gemma 4 26B A4B (free)"
+        },
+        "thinkingmachines/inkling:free": {
+          "name": "Inkling (free)"
+        },
+        "nex-agi/nex-n2.5-pro:free": {
+          "name": "Nex-N2.5-Pro (free)"
+        },
+        "thinkingmachines/inkling-small:free": {
+          "name": "Inkling Small (free)"
+        }
+      }
+    },
+    "deepseek": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DeepSeek",
+      "options": {
+        "baseURL": "https://api.deepseek.com/v1",
+        "apiKey": "{env:DEEPSEEK_API_KEY}"
+      },
+      "models": {
+        "deepseek-chat": {
+          "name": "DeepSeek V3 (chat)"
+        },
+        "deepseek-reasoner": {
+          "name": "DeepSeek R1 (reasoner)"
+        }
+      }
+    },
+    "moonshot": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Moonshot / Kimi",
+      "options": {
+        "baseURL": "https://api.moonshot.ai/v1",
+        "apiKey": "{env:MOONSHOT_API_KEY}"
+      },
+      "models": {
+        "kimi-k2-0711-preview": {
+          "name": "Kimi K2"
+        },
+        "moonshot-v1-32k": {
+          "name": "Moonshot V1 32k"
+        }
+      }
+    },
+    "siliconflow": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SiliconFlow (free)",
+      "options": {
+        "baseURL": "https://api.siliconflow.cn/v1",
+        "apiKey": "{env:SILICONFLOW_API_KEY}"
+      },
+      "models": {
+        "Qwen/Qwen2.5-Coder-32B-Instruct": {
+          "name": "Qwen 2.5 Coder 32B"
+        },
+        "deepseek-ai/DeepSeek-V3": {
+          "name": "DeepSeek V3"
+        }
+      }
+    },
+    "minimax": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "MiniMax",
+      "options": {
+        "baseURL": "https://api.minimax.io/v1",
+        "apiKey": "{env:MINIMAX_API_KEY}"
+      },
+      "models": {
+        "MiniMax-M2.5": {
+          "name": "MiniMax M2.5"
+        }
+      }
+    },
+    "zai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "ZAI",
+      "options": {
+        "baseURL": "http://127.0.0.1:36019/v1",
+        "apiKey": "zai-proxy"
+      },
+      "models": {
+        "glm-4.5-flash": {
+          "name": "GLM-4.5-Flash"
+        }
+      }
+    },
+    "fcm-googleai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "FCM Google AI Studio",
+      "options": {
+        "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "apiKey": "{env:FCM_GOOGLEAI_API_KEY}"
+      },
+      "models": {
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash"
+        },
+        "gemini-3.7-flash": {
+          "name": "Gemini 3.7 Flash"
+        },
+        "gemini-3.6-flash": {
+          "name": "Gemini 3.6 Flash"
+        },
+        "gemini-3.5-flash": {
+          "name": "Gemini 3.5 Flash"
+        },
+        "gemini-3.5-flash-lite": {
+          "name": "Gemini 3.5 Flash Lite"
+        },
+        "gemini-3.1-flash-lite": {
+          "name": "Gemini 3.1 Flash Lite"
+        },
+        "gemini-2.5-flash": {
+          "name": "Gemini 2.5 Flash"
+        },
+        "gemini-2.5-flash-lite": {
+          "name": "Gemini 2.5 Flash Lite"
+        },
+        "gemini-3-flash-preview": {
+          "name": "Gemini 3 Flash Preview"
+        },
+        "gemini-2.5-pro": {
+          "name": "Gemini 2.5 Pro"
+        },
+        "gemini-3.1-pro-preview": {
+          "name": "Gemini 3.1 Pro Preview"
+        }
+      }
+    },
+    "fcm-zai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "FCM ZAI (z.ai)",
+      "options": {
+        "baseURL": "https://api.z.ai/api/coding/paas/v4",
+        "apiKey": "{env:FCM_ZAI_API_KEY}"
+      },
+      "models": {
+        "zai/glm-5.3-flash": {
+          "name": "GLM-5.3-Flash"
+        },
+        "zai/glm-5.2": {
+          "name": "GLM-5.2"
+        },
+        "zai/glm-5.3": {
+          "name": "GLM-5.3"
+        },
+        "zai/glm-5.1": {
+          "name": "GLM-5.1"
+        },
+        "zai/glm-5": {
+          "name": "GLM-5"
+        },
+        "zai/glm-4.7-flash": {
+          "name": "GLM-4.7-Flash"
+        },
+        "zai/glm-4.5-flash": {
+          "name": "GLM-4.5-Flash"
+        },
+        "zai/glm-5-turbo": {
+          "name": "GLM-5-Turbo"
+        },
+        "zai/glm-4.7": {
+          "name": "GLM-4.7"
+        },
+        "zai/glm-4.6": {
+          "name": "GLM-4.6"
+        },
+        "zai/glm-4.6v-flash": {
+          "name": "GLM-4.6V-Flash"
+        },
+        "zai/glm-4.7-flashx": {
+          "name": "GLM-4.7-FlashX"
+        }
+      }
+    },
+    "fcm-openrouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "FCM OpenRouter",
+      "options": {
+        "baseURL": "https://openrouter.ai/api/v1",
+        "apiKey": "{env:FCM_OPENROUTER_API_KEY}"
+      },
+      "models": {
+        "nvidia/nemotron-3-ultra-550b-a55b:free": {
+          "name": "Nemotron 3 Ultra"
+        },
+        "poolside/laguna-xs-2.1:free": {
+          "name": "Poolside Laguna XS 2.1"
+        },
+        "poolside/laguna-s-2.1:free": {
+          "name": "Poolside Laguna S 2.1"
+        },
+        "z-ai/glm-5.2:free": {
+          "name": "GLM-5.2"
+        },
+        "cohere/north-mini-code:free": {
+          "name": "North Mini Code"
+        },
+        "nvidia/nemotron-3-super-120b-a12b:free": {
+          "name": "Nemotron 3 Super"
+        },
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
+          "name": "Nemotron 3 Omni"
+        },
+        "google/gemma-4-31b-it:free": {
+          "name": "Gemma 4 31B"
+        },
+        "google/gemma-4-26b-a4b-it:free": {
+          "name": "Gemma 4 26B MoE"
+        },
+        "nex-agi/nex-n2.5-pro:free": {
+          "name": "Nex AGI Nex-N2.5-Pro"
+        },
+        "liquid/lfm-2.5-2.6b:free": {
+          "name": "LiquidAI LFM2.5-2.6B"
+        },
+        "nvidia/nemotron-3.5-lightning:free": {
+          "name": "NVIDIA Nemotron 3.5 Lightning"
+        },
+        "inclusionai/ling-3.0-flash-fin:free": {
+          "name": "Ling 3.0 Flash Fin"
+        },
+        "thinkingmachines/inkling:free": {
+          "name": "Inkling"
+        },
+        "inclusionai/ling-3.0-flash-sante:free": {
+          "name": "Ling 3.0 Flash Sante"
+        },
+        "nex-agi/nex-n2.5-mini:free": {
+          "name": "Nex AGI Nex-N2.5-Mini"
+        },
+        "inclusionai/ling-3.0-flash-vl:free": {
+          "name": "Ling 3.0 Flash VL"
+        },
+        "thinkingmachines/inkling-small:free": {
+          "name": "Inkling Small"
+        },
+        "dots-studio/dots-3-note-preview:free": {
+          "name": "Dots 3 Note Preview"
+        },
+        "nvidia/nemotron-3.5-content-safety:free": {
+          "name": "Nemotron 3.5 Content Safety"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": [
+        "/home/asdcxfrt/.local/bin/serena",
+        "start-mcp-server",
+        "--context",
+        "ide",
+        "--project-from-cwd"
+      ],
+      "enabled": true
+    },
+    "jupyter": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "jupyter-mcp-server@latest"
+      ],
+      "environment": {
+        "JUPYTER_URL": "http://127.0.0.1:8888",
+        "JUPYTER_TOKEN": "{env:JUPYTER_TOKEN}",
+        "ALLOW_IMG_OUTPUT": "true"
+      },
+      "enabled": true
+    },
+    "hf": {
+      "type": "remote",
+      "url": "https://huggingface.co/mcp",
+      "enabled": true
+    },
+    "arxiv": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "arxiv-mcp-server"
+      ],
+      "enabled": true
+    },
+    "memory": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "environment": {
+        "MEMORY_FILE_PATH": "{env:HOME}/.config/opencode/memory.jsonl"
+      },
+      "enabled": true
+    }
+  },
+  "plugin": [
+    "oh-my-opencode-slim",
+    "@tarquinen/opencode-dcp@latest"
+  ],
+  "agent": {
+    "explore": {
+      "disable": true
+    },
+    "general": {
+      "disable": true
+    }
+  },
+  "lsp": true
+}

@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Scaffold a new spec-first project with a rendered, gate-ready spec.
+
+Usage:
+    spec-new <name> [--title TITLE] [--base DIR] [--no-git] [--force]
+
+Creates ``<base>/<name>`` (default base ``~/Projects``) containing
+``.slim/spec/<slug>.md`` rendered from the spec template, a Diátaxis/ADR
+``docs/`` tree (``tutorials``, ``how-to``, ``reference``, ``explanation``,
+``adr`` with ``0000-template.md`` and a concrete ``0001-<slug>.md``), a short
+``README.md`` and a Python/C++ ``.gitignore``. Unless ``--no-git`` is given,
+``git init -q`` runs inside the new project. Code writing stays blocked by the
+``spec-gate`` plugin until the human approves the emitted spec.
+"""
+
+from __future__ import annotations
+
+import datetime
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path(os.path.expanduser("~"))
+DEFAULT_BASE = HOME / "Projects"
+SCRIPT_DIR = Path(__file__).resolve().parent
+SPEC_TEMPLATE = SCRIPT_DIR.parent / "templates" / "spec-template.md"
+ADR_TEMPLATE = SCRIPT_DIR.parent / "templates" / "adr-template.md"
+
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Placeholder ADR path inside the spec template, e.g. `docs/adr/NNNN-<title>.md`.
+SPEC_ADR_PLACEHOLDER_RE = re.compile(r"docs/adr/NNNN[^\s`]*")
+# Status field of the ADR template: `- **Статус:** ...` or `status: ...`.
+ADR_STATUS_FIELD_RE = re.compile(
+    r"^([ \t]*(?:-[ \t]*\*\*Статус:\*\*|status:)[ \t]*).*$", re.MULTILINE
+)
+
+# Diátaxis / Nygard ADR skeleton emitted on every scaffold.
+DIATAXIS_READMES = {
+    "docs/tutorials/README.md": (
+        "# Tutorials (Diátaxis)\n\n"
+        "Пошаговые обучающие материалы для новичка в проекте.\n"
+    ),
+    "docs/how-to/README.md": (
+        "# How-To (Diátaxis)\n\n"
+        "Рецепты решения конкретных прикладных задач.\n"
+    ),
+    "docs/reference/README.md": (
+        "# Reference (Diátaxis)\n\n"
+        "Нормативные контракты и интерфейсы. Реализация обязана соответствовать этому разделу.\n"
+    ),
+    "docs/explanation/README.md": (
+        "# Explanation (Diátaxis)\n\n"
+        "Объяснения причин, компромиссов и границ применимости.\n"
+    ),
+    "docs/adr/README.md": (
+        "# Architecture Decision Records (Nygard)\n\n"
+        "Формат имени: `NNNN-title.md`. Шаблон: `0000-template.md`.\n"
+    ),
+}
+
+USAGE = """Usage:
+    spec-new <name> [--title TITLE] [--base DIR] [--no-git] [--force] [--help]
+
+Create a new spec-first project skeleton. <name> is the project directory
+name (slug = lowercased, '_'/'.' replaced by '-'). Default base is
+$HOME/Projects. A Diátaxis/ADR docs/ tree is emitted alongside the spec. The
+generated spec must be human-approved before code may be written; until then
+spec-gate blocks edits with [SPEC-GATE BLOCKED].
+"""
+
+GITIGNORE = """__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.o
+*.so
+*.a
+compile_commands.json
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.cache/
+.DS_Store
+"""
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"spec-new: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def parse_args(argv: list[str]) -> dict:
+    name: str | None = None
+    title: str | None = None
+    base = DEFAULT_BASE
+    no_git = False
+    force = False
+
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-h", "--help"):
+            print(USAGE, end="")
+            raise SystemExit(0)
+        if arg == "--title":
+            i += 1
+            if i >= len(argv):
+                die("--title requires a value")
+            title = argv[i]
+        elif arg == "--base":
+            i += 1
+            if i >= len(argv):
+                die("--base requires a value")
+            base = Path(argv[i]).expanduser()
+        elif arg == "--no-git":
+            no_git = True
+        elif arg == "--force":
+            force = True
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif name is None:
+            name = arg
+        else:
+            die(f"unexpected argument: {arg}")
+        i += 1
+
+    if name is None:
+        die("missing <name> (try --help)")
+    if not NAME_RE.match(name):
+        die(
+            f"invalid project name: {name!r} "
+            "(must match ^[A-Za-z0-9][A-Za-z0-9._-]*$, e.g. 'my-project')"
+        )
+    return {"name": name, "title": title, "base": base, "no_git": no_git, "force": force}
+
+
+def render_spec(template: str, title: str, slug: str) -> str:
+    text = template.replace("# <Название задачи>", f"# {title}", 1)
+    text = text.replace("YYYY-MM-DD", datetime.date.today().isoformat())
+    text = text.replace("<branch-or-path>", "main")
+    text = text.replace("<task_slug>", slug)
+    # Point the spec at its concrete ADR instead of the NNNN placeholder.
+    text = SPEC_ADR_PLACEHOLDER_RE.sub(lambda _m: f"docs/adr/0001-{slug}.md", text)
+    for leftover in ("<Название задачи>", "<branch-or-path>", "<task_slug>", "YYYY-MM-DD"):
+        if leftover in text:
+            die(f"rendered spec still contains placeholder {leftover!r}")
+    return text
+
+
+def render_adr(template: str, slug: str) -> str:
+    heading = f"# ADR 0001: {slug} — первичное архитектурное решение"
+    text = re.sub(r"^# .*$", lambda _m: heading, template, count=1, flags=re.MULTILINE)
+    text = ADR_STATUS_FIELD_RE.sub(lambda m: f"{m.group(1)}proposed", text, count=1)
+    return text
+
+
+def render_readme(name: str, slug: str, spec_abs: Path) -> str:
+    return f"""# {name}
+
+<!--- One-line purpose placeholder: replace with what this project does. --->
+
+## Development
+
+- Python: `/home/asdcxfrt/ml_base/.venv` (see `AGENTS.md`).
+- C++: CMake + CTest.
+
+## Specification
+
+The specification lives at `.slim/spec/{slug}.md` and **must be human-approved
+before any code may be written**. Until then the `spec-gate` plugin blocks code
+edits with `[SPEC-GATE BLOCKED]`. Approve it as a human with:
+
+```bash
+~/.config/opencode/bin/spec-approve {spec_abs}
+```
+"""
+
+
+def write_new(path: Path, content: str, force: bool, created: list[Path]) -> None:
+    if path.exists():
+        if not force:
+            die(f"file already exists: {path}")
+        return  # --force fills only missing files, never overwrites
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    created.append(path)
+
+
+def main(argv: list[str]) -> int:
+    opts = parse_args(argv)
+    name: str = opts["name"]
+    title: str = opts["title"] or name
+    base: Path = opts["base"]
+    force: bool = opts["force"]
+
+    slug = name.lower().replace("_", "-").replace(".", "-")
+    target = base / name
+
+    if target.exists() and not target.is_dir():
+        die(f"target exists and is not a directory: {target}")
+    if target.is_dir() and any(target.iterdir()) and not force:
+        die(f"target directory is not empty: {target} (use --force to fill in missing files)")
+
+    if not SPEC_TEMPLATE.is_file():
+        die(f"spec template not found: {SPEC_TEMPLATE}")
+    if not ADR_TEMPLATE.is_file():
+        die(f"adr template not found: {ADR_TEMPLATE}")
+
+    base.mkdir(parents=True, exist_ok=True)
+    target.mkdir(parents=True, exist_ok=True)
+
+    spec_path = target / ".slim" / "spec" / f"{slug}.md"
+    readme_path = target / "README.md"
+    gitignore_path = target / ".gitignore"
+
+    adr_template_text = ADR_TEMPLATE.read_text(encoding="utf-8")
+
+    created: list[Path] = []
+    write_new(spec_path, render_spec(SPEC_TEMPLATE.read_text(encoding="utf-8"), title, slug), force, created)
+    write_new(readme_path, render_readme(name, slug, spec_path.resolve()), force, created)
+    write_new(gitignore_path, GITIGNORE, force, created)
+    for rel, content in DIATAXIS_READMES.items():
+        write_new(target / rel, content, force, created)
+    write_new(target / "docs" / "adr" / "0000-template.md", adr_template_text, force, created)
+    write_new(target / "docs" / "adr" / f"0001-{slug}.md", render_adr(adr_template_text, slug), force, created)
+
+    if not opts["no_git"]:
+        try:
+            result = subprocess.run(
+                ["git", "init", "-q"],
+                cwd=target,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                print(
+                    f"spec-new: warning: 'git init' failed (exit {result.returncode}); continuing",
+                    file=sys.stderr,
+                )
+        except OSError as exc:
+            print(f"spec-new: warning: git unavailable ({exc}); continuing", file=sys.stderr)
+
+    for path in created:
+        print(path)
+    print()
+    print("Next steps:")
+    print("  1. Repository structure: docs/{tutorials,how-to,reference,explanation,adr}/, .slim/spec/")
+    print(f"  2. Fill in the specification: {spec_path}")
+    print(f"  3. Approve it as a human: ~/.config/opencode/bin/spec-approve {spec_path}")
+    print("  4. Until approved, code edits stay blocked by [SPEC-GATE BLOCKED].")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

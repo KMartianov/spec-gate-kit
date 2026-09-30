@@ -1,0 +1,7 @@
+{
+  "plugin": [
+    "oh-my-opencode-slim",
+    "./plugins/token-tracker.tsx",
+    "./plugins/session-note.ts"
+  ]
+}

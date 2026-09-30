@@ -1,0 +1,148 @@
+policies=['A', 'A_batch', 'B_perc', 'B', 'C', 'D', 'E', 'A+D', 'B+D', 'B+C', 'B+C+D', 'B+C+D+E'] scenarios=['n4', 'n8', 'n16'] reps=10000 seed_base=0
+    n4 A          wall p50=   59.0 min  falseDONE= 0.011  checks=     79
+    n4 A_batch    wall p50=   58.8 min  falseDONE= 0.009  checks=     76
+    n4 B_perc     wall p50=   55.8 min  falseDONE= 0.011  checks=     73
+    n4 B          wall p50=   55.5 min  falseDONE= 0.011  checks=     72
+    n4 C          wall p50=   57.5 min  falseDONE= 0.016  checks=     62
+    n4 D          wall p50=   60.9 min  falseDONE= 0.011  checks=     81
+    n4 E          wall p50=   55.3 min  falseDONE= 0.087  checks=     54
+    n4 A+D        wall p50=   57.4 min  falseDONE= 0.010  checks=     82
+    n4 B+D        wall p50=   57.7 min  falseDONE= 0.009  checks=     75
+    n4 B+C        wall p50=   55.1 min  falseDONE= 0.020  checks=     58
+    n4 B+C+D      wall p50=   57.9 min  falseDONE= 0.017  checks=     61
+    n4 B+C+D+E    wall p50=   56.3 min  falseDONE= 0.085  checks=     45
+    n8 A          wall p50=  116.2 min  falseDONE= 0.010  checks=    224
+    n8 A_batch    wall p50=  116.2 min  falseDONE= 0.009  checks=    224
+    n8 B_perc     wall p50=  103.9 min  falseDONE= 0.011  checks=    206
+    n8 B          wall p50=  103.7 min  falseDONE= 0.009  checks=    202
+    n8 C          wall p50=  111.3 min  falseDONE= 0.021  checks=    172
+    n8 D          wall p50=  117.4 min  falseDONE= 0.010  checks=    234
+    n8 E          wall p50=  106.0 min  falseDONE= 0.102  checks=    157
+    n8 A+D        wall p50=  111.2 min  falseDONE= 0.009  checks=    234
+    n8 B+D        wall p50=  107.1 min  falseDONE= 0.010  checks=    215
+    n8 B+C        wall p50=  102.4 min  falseDONE= 0.018  checks=    158
+    n8 B+C+D      wall p50=  106.6 min  falseDONE= 0.021  checks=    166
+    n8 B+C+D+E    wall p50=  105.1 min  falseDONE= 0.071  checks=    123
+   n16 A          wall p50=  250.2 min  falseDONE= 0.010  checks=    662
+   n16 A_batch    wall p50=  249.4 min  falseDONE= 0.009  checks=    655
+   n16 B_perc     wall p50=  207.5 min  falseDONE= 0.010  checks=    598
+   n16 B          wall p50=  206.8 min  falseDONE= 0.011  checks=    594
+   n16 C          wall p50=  235.3 min  falseDONE= 0.024  checks=    516
+   n16 D          wall p50=  243.5 min  falseDONE= 0.008  checks=    699
+   n16 E          wall p50=  219.3 min  falseDONE= 0.104  checks=    464
+   n16 A+D        wall p50=  231.5 min  falseDONE= 0.009  checks=    692
+   n16 B+D        wall p50=  210.5 min  falseDONE= 0.009  checks=    633
+   n16 B+C        wall p50=  203.4 min  falseDONE= 0.022  checks=    466
+   n16 B+C+D      wall p50=  209.0 min  falseDONE= 0.024  checks=    496
+   n16 B+C+D+E    wall p50=  205.4 min  falseDONE= 0.051  checks=    366
+
+=== scenario n16 (10000 reps) — sorted by wall p50 ===
+policy      wall50  wall95  verify  checks  waves      $  inter  appr rework  fDONE  cens
+-----------------------------------------------------------------------------------------
+B+C          203.4   241.7    20.0     466    6.5   5.52    5.9  19.2   5.46   2.2%  0.0%
+B+C+D+E      205.4   247.0    21.5     366    6.5   5.25    5.9  19.2   3.69   5.1%  0.0%
+B            206.8   246.6    24.4     594    6.5   5.75    5.9  19.2   5.37   1.1%  0.0%
+B_perc       207.5   247.7    24.6     598    6.7   5.76   19.2  19.2   5.37   1.0%  0.0%
+B+C+D        209.0   252.6    27.5     496    6.6   5.49    5.9  19.2   3.76   2.4%  0.0%
+B+D          210.5   254.3    33.6     633    6.6   5.74    6.0  19.2   3.77   0.9%  0.0%
+E            219.3   268.5    38.9     464    6.3   5.50    5.9  19.2   5.30  10.4%  0.0%
+A+D          231.5   281.4    95.2     692    6.6   5.93   19.2  19.2   5.40   0.9%  0.0%
+C            235.3   282.1    54.5     516    6.5   5.61    5.9  19.2   5.42   2.4%  0.0%
+D            243.5   298.5    96.1     699    6.6   5.85    6.0  19.2   3.73   0.8%  0.0%
+A_batch      249.4   307.2    69.3     655    6.4   5.86    5.9  19.2   5.42   0.9%  0.0%
+A            250.2   307.5    70.1     662    6.6   5.87   19.3  19.2   5.40   1.0%  0.0%
+pareto(wall,$,falseDONE,interactions): B+C, B+C+D+E, B, B_perc, B+C+D, B+D, E, D, A_batch
+
+=== scenario n4 (10000 reps) — sorted by wall p50 ===
+policy      wall50  wall95  verify  checks  waves      $  inter  appr rework  fDONE  cens
+-----------------------------------------------------------------------------------------
+B+C           55.1    76.8     3.8      58    2.8   1.28    2.5   4.8   1.18   2.0%  0.0%
+E             55.3    77.3     4.5      54    2.7   1.27    2.4   4.8   1.03   8.7%  0.0%
+B             55.5    77.3     4.3      72    2.8   1.31    2.4   4.8   1.19   1.1%  0.0%
+B_perc        55.8    77.7     4.5      73    3.0   1.31    4.8   4.8   1.13   1.1%  0.0%
+B+C+D+E       56.3    78.7     3.7      45    2.7   1.24    2.5   4.8   0.82   8.5%  0.0%
+A+D           57.4    80.3    11.3      82    3.0   1.33    4.8   4.8   1.12   1.0%  0.0%
+C             57.5    80.2     6.6      62    2.8   1.29    2.4   4.8   1.16   1.6%  0.0%
+B+D           57.7    81.3     5.7      75    2.8   1.30    2.5   4.8   0.92   0.9%  0.0%
+B+C+D         57.9    80.8     5.0      61    2.8   1.27    2.5   4.8   0.91   1.7%  0.0%
+A_batch       58.8    82.2     8.1      76    2.8   1.32    2.4   4.8   1.17   0.9%  0.0%
+A             59.0    83.3     8.4      79    3.0   1.32    4.8   4.8   1.13   1.1%  0.0%
+D             60.9    84.7    11.1      81    2.8   1.31    2.5   4.8   0.92   1.1%  0.0%
+pareto(wall,$,falseDONE,interactions): B+C, E, B, B+C+D+E, A+D, C, B+D, B+C+D, A_batch
+
+=== scenario n8 (10000 reps) — sorted by wall p50 ===
+policy      wall50  wall95  verify  checks  waves      $  inter  appr rework  fDONE  cens
+-----------------------------------------------------------------------------------------
+B+C          102.4   131.2     8.1     158    4.2   2.63    3.2   9.6   2.55   1.8%  0.0%
+B            103.7   133.2     9.6     202    4.2   2.71    3.2   9.6   2.53   0.9%  0.0%
+B_perc       103.9   133.3     9.8     206    4.4   2.72    9.6   9.6   2.52   1.1%  0.0%
+B+C+D+E      105.1   135.2     8.6     123    4.2   2.53    3.2   9.6   1.78   7.1%  0.0%
+E            106.0   137.6    13.2     157    4.1   2.62    3.2   9.6   2.36  10.2%  0.0%
+B+C+D        106.6   138.7    10.9     166    4.2   2.61    3.2   9.6   1.87   2.1%  0.0%
+B+D          107.1   139.5    13.0     215    4.2   2.70    3.2   9.6   1.86   1.0%  0.0%
+A+D          111.2   143.7    32.2     234    4.3   2.77    9.6   9.6   2.55   0.9%  0.0%
+C            111.3   142.3    18.2     172    4.2   2.65    3.2   9.6   2.51   2.1%  0.0%
+A_batch      116.2   151.9    23.7     224    4.2   2.75    3.2   9.6   2.56   0.9%  0.0%
+A            116.2   152.4    23.7     224    4.3   2.75    9.6   9.6   2.53   1.0%  0.0%
+D            117.4   153.6    32.2     234    4.2   2.73    3.2   9.6   1.84   1.0%  0.0%
+pareto(wall,$,falseDONE,interactions): B+C, B, B+C+D+E, E, B+C+D, B+D, A_batch
+  sens base               A          wall50=  249.9 fDONE= 0.011
+  sens base               B          wall50=  207.0 fDONE= 0.009
+  sens base               B+C        wall50=  203.7 fDONE= 0.023
+  sens base               B+C+D      wall50=  208.9 fDONE= 0.023
+  sens approval_fast      A          wall50=  249.5 fDONE= 0.009
+  sens approval_fast      B          wall50=  205.7 fDONE= 0.008
+  sens approval_fast      B+C        wall50=  201.9 fDONE= 0.025
+  sens approval_fast      B+C+D      wall50=  206.5 fDONE= 0.024
+  sens approval_slow      A          wall50=  622.3 fDONE= 0.009
+  sens approval_slow      B          wall50=  233.5 fDONE= 0.008
+  sens approval_slow      B+C        wall50=  230.4 fDONE= 0.023
+  sens approval_slow      B+C+D      wall50=  235.9 fDONE= 0.020
+  sens flake_high         A          wall50=  255.5 fDONE= 0.007
+  sens flake_high         B          wall50=  209.3 fDONE= 0.009
+  sens flake_high         B+C        wall50=  204.8 fDONE= 0.026
+  sens flake_high         B+C+D      wall50=  211.7 fDONE= 0.016
+  sens flake_zero         A          wall50=  248.3 fDONE= 0.011
+  sens flake_zero         B          wall50=  206.1 fDONE= 0.011
+  sens flake_zero         B+C        wall50=  203.1 fDONE= 0.025
+  sens flake_zero         B+C+D      wall50=  207.7 fDONE= 0.028
+  sens hidden_input_high  A          wall50=  250.1 fDONE= 0.011
+  sens hidden_input_high  B          wall50=  207.0 fDONE= 0.011
+  sens hidden_input_high  B+C        wall50=  203.9 fDONE= 0.040
+  sens hidden_input_high  B+C+D      wall50=  209.1 fDONE= 0.038
+  sens hidden_input_zero  A          wall50=  251.1 fDONE= 0.011
+  sens hidden_input_zero  B          wall50=  207.9 fDONE= 0.008
+  sens hidden_input_zero  B+C        wall50=  203.0 fDONE= 0.019
+  sens hidden_input_zero  B+C+D      wall50=  209.2 fDONE= 0.021
+
+=== sensitivity ===
+base               A          wall50=  249.9 fDONE= 0.011 checks=    659 inter= 19.3
+base               B          wall50=  207.0 fDONE= 0.009 checks=    596 inter=  5.9
+base               B+C        wall50=  203.7 fDONE= 0.023 checks=    464 inter=  5.8
+base               B+C+D      wall50=  208.9 fDONE= 0.023 checks=    497 inter=  6.0
+approval_fast      A          wall50=  249.5 fDONE= 0.009 checks=    653 inter= 19.2
+approval_fast      B          wall50=  205.7 fDONE= 0.008 checks=    583 inter=  6.4
+approval_fast      B+C        wall50=  201.9 fDONE= 0.025 checks=    465 inter=  6.4
+approval_fast      B+C+D      wall50=  206.5 fDONE= 0.024 checks=    491 inter=  6.5
+approval_slow      A          wall50=  622.3 fDONE= 0.009 checks=   1194 inter= 19.3
+approval_slow      B          wall50=  233.5 fDONE= 0.008 checks=    650 inter=  4.5
+approval_slow      B+C        wall50=  230.4 fDONE= 0.023 checks=    489 inter=  4.5
+approval_slow      B+C+D      wall50=  235.9 fDONE= 0.020 checks=    518 inter=  4.6
+flake_high         A          wall50=  255.5 fDONE= 0.007 checks=    717 inter= 19.2
+flake_high         B          wall50=  209.3 fDONE= 0.009 checks=    650 inter=  5.9
+flake_high         B+C        wall50=  204.8 fDONE= 0.026 checks=    505 inter=  5.9
+flake_high         B+C+D      wall50=  211.7 fDONE= 0.016 checks=    588 inter=  5.9
+flake_zero         A          wall50=  248.3 fDONE= 0.011 checks=    643 inter= 19.3
+flake_zero         B          wall50=  206.1 fDONE= 0.011 checks=    566 inter=  5.9
+flake_zero         B+C        wall50=  203.1 fDONE= 0.025 checks=    449 inter=  5.9
+flake_zero         B+C+D      wall50=  207.7 fDONE= 0.028 checks=    457 inter=  6.0
+hidden_input_high  A          wall50=  250.1 fDONE= 0.011 checks=    662 inter= 19.3
+hidden_input_high  B          wall50=  207.0 fDONE= 0.011 checks=    592 inter=  5.9
+hidden_input_high  B+C        wall50=  203.9 fDONE= 0.040 checks=    471 inter=  5.9
+hidden_input_high  B+C+D      wall50=  209.1 fDONE= 0.038 checks=    498 inter=  6.0
+hidden_input_zero  A          wall50=  251.1 fDONE= 0.011 checks=    662 inter= 19.2
+hidden_input_zero  B          wall50=  207.9 fDONE= 0.008 checks=    596 inter=  5.9
+hidden_input_zero  B+C        wall50=  203.0 fDONE= 0.019 checks=    463 inter=  5.9
+hidden_input_zero  B+C+D      wall50=  209.2 fDONE= 0.021 checks=    493 inter=  6.0
+
+wrote /home/asdcxfrt/Projects/spec-gate-kit/research/sim/results/summary.csv, summary.json, sensitivity.csv
