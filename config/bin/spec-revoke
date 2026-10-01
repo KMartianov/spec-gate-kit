@@ -79,7 +79,8 @@ Exit codes:
 """
 
 STATUS_APPROVED_RE = re.compile(
-    r"^([ \t]*-[ \t]*\*\*Статус спецификации:\*\*[ \t]*)`approved`(.*)$", re.MULTILINE
+    r"^([ \t]*-[ \t]*\*\*Статус спецификации:\*\*[ \t]*)(?:`approved`|approved)(.*)$",
+    re.MULTILINE,
 )
 APPROVED_LINE_RE = re.compile(
     r"^[ \t]*-[ \t]*\*\*Утверждено:\*\*[^\n]*\n?", re.MULTILINE
@@ -167,7 +168,12 @@ def load_records(rec_dir: Path) -> list[tuple[Path, dict | None, Path | None]]:
 
 
 def mark_draft(text: str) -> str:
-    """Flip the status token back to `draft` and drop the Утверждено line."""
+    """Flip the status token back to `draft` and drop the Утверждено line.
+
+    Both the backticked `` `approved` `` and the bare ``approved`` token (legacy
+    or hand-edited status line) are recognised; the result is always written in
+    the canonical backticked form.
+    """
     text = STATUS_APPROVED_RE.sub(lambda m: f"{m.group(1)}`draft`{m.group(2)}", text)
     return APPROVED_LINE_RE.sub("", text)
 

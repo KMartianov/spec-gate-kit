@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "pattern_cases": [
+    {"id": "doublestar-covers-self", "rel": "a", "pattern": "a/**", "match": true},
+    {"id": "doublestar-recursive-tail", "rel": "a/b/c", "pattern": "a/**", "match": true},
+    {"id": "doublestar-not-prefix", "rel": "ax", "pattern": "a/**", "match": false},
+    {"id": "star-matches-component", "rel": "a/b", "pattern": "a/*", "match": true},
+    {"id": "star-does-not-cross-slash", "rel": "a/b/c", "pattern": "a/*", "match": false},
+    {"id": "star-alone-does-not-cross-slash", "rel": "a/b", "pattern": "*", "match": false},
+    {"id": "question-matches-one-char", "rel": "abc", "pattern": "a?c", "match": true},
+    {"id": "question-does-not-match-slash", "rel": "a/c", "pattern": "a?c", "match": false},
+    {"id": "question-does-not-match-zero", "rel": "ac", "pattern": "a?c", "match": false},
+    {"id": "question-does-not-match-two", "rel": "abbc", "pattern": "a?c", "match": false},
+    {"id": "class-range-matches", "rel": "xyz", "pattern": "x[p-z]z", "match": true},
+    {"id": "negation-class-accepts-unlisted", "rel": "xaz", "pattern": "x[!p-z]z", "match": true},
+    {"id": "negation-class-rejects-listed", "rel": "xpz", "pattern": "x[!p-z]z", "match": false},
+    {"id": "dot-is-literal-match", "rel": "a.b", "pattern": "a.b", "match": true},
+    {"id": "dot-is-not-wildcard", "rel": "axb", "pattern": "a.b", "match": false},
+    {"id": "plus-is-literal", "rel": "a+b", "pattern": "a+b", "match": true},
+    {"id": "doublestar-zero-components", "rel": "x/y", "pattern": "x/**/y", "match": true},
+    {"id": "doublestar-many-components", "rel": "x/p/q/y", "pattern": "x/**/y", "match": true},
+    {"id": "anchoring-trailing-newline-rejected", "rel": "src/app.ts\n", "pattern": "src/*.ts", "match": false},
+    {"id": "anchoring-no-newline-accepted", "rel": "src/app.ts", "pattern": "src/*.ts", "match": true}
+  ],
+  "scope_cases": [
+    {"id": "scope-deny-wins", "rel": "src/secret/x", "allow": ["src/**"], "deny": ["src/secret/**"], "allowed": false},
+    {"id": "scope-deny-wins-allow-sibling", "rel": "src/ok/x", "allow": ["src/**"], "deny": ["src/secret/**"], "allowed": true},
+    {"id": "scope-empty-allow-grants-nothing", "rel": "src/ok/x", "allow": [], "deny": [], "allowed": false},
+    {"id": "scope-outside-allow", "rel": "test/x", "allow": ["src/**"], "deny": [], "allowed": false},
+    {"id": "scope-doublestar-covers-self", "rel": "a", "allow": ["a/**"], "deny": [], "allowed": true}
+  ]
+}

@@ -469,7 +469,11 @@ function globSource(pattern: string): string {
 function globMatch(rel: string, pattern: string): boolean {
   let regex = REGEX_CACHE.get(pattern)
   if (regex === undefined) {
-    regex = new RegExp("^" + globSource(pattern) + "$")
+    // Anchor to the TRUE end of input. A bare `$` is engine/flag dependent
+    // (with the `m` flag it also matches before a trailing newline), whereas
+    // Python's `re.fullmatch` never forgives a trailing `\n`. `(?![\s\S])`
+    // asserts "no character can follow", i.e. the real end of the string.
+    regex = new RegExp("^" + globSource(pattern) + "(?![\\s\\S])")
     REGEX_CACHE.set(pattern, regex)
   }
   return regex.test(rel)

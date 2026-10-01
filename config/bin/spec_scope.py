@@ -4,7 +4,7 @@
 Single source of truth for the governance primitives used by ``bin/spec-status``,
 ``bin/dod-run`` and ``bin/docs-lint``.  The TypeScript mirror of the hot path
 lives in ``plugins/spec-gate.ts``; both implementations are pinned to the common
-vectors in ``tools/gov/scope_vectors.json`` (glob semantics, scope composition,
+vectors in ``config/tools/gov/scope_vectors.json`` (glob semantics, scope composition,
 file classification).
 
 Public surface (see the approved spec §3.8):

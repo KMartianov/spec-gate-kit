@@ -2,13 +2,13 @@
   "check": "preflight-0-preflight",
   "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 python3 config/bin/spec-preflight",
   "exit_code": 0,
-  "started_at": "2026-09-30T21:58:55.770214+00:00",
-  "finished_at": "2026-09-30T21:58:55.850304+00:00",
-  "duration_s": 0.08,
+  "started_at": "2026-09-30T21:59:52.878823+00:00",
+  "finished_at": "2026-09-30T21:59:52.970597+00:00",
+  "duration_s": 0.092,
   "spec": "/home/asdcxfrt/Projects/spec-gate-kit/.slim/spec/preflight-0.md",
   "spec_sha256": "bde4a1f4063d8cb3deb63d32accd790ec965e732e3dda6c47fdc754e4313e118",
   "tail": "",
-  "git_head": "ddb756fd340af91ec6bad5cf607d3248135cedfa",
+  "git_head": "7d7949f9c5400ea7c7eaa6aadbb59cabd23d367b",
   "tree_dirty": false,
   "scope_sha256": "9a0d87843444e3dcda54700b8be95f016bd1cd77173793380c07467b2256ba80"
 }

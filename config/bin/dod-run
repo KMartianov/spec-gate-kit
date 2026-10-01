@@ -34,7 +34,11 @@ run's own build artifacts cannot influence it -- GOV-4):
 commits); ``tree_dirty`` is true when changes exist outside ``.slim/spec`` and
 ``verify``; ``scope_sha256`` digests the tracked files covered by the spec's
 ``scope`` fence. ``tail`` holds the last 2000 combined stdout+stderr characters.
-Exit status is 0 iff every selected check exited 0, else 1.
+Exit status is 0 iff every selected check exited 0, else 1. Evidence is written
+atomically (same-directory temp + ``os.replace``) and read back; a file that
+cannot be written or does not round-trip -- a foreign or unparseable existing
+``verify/<id>.json``, or a readback mismatch -- exits 3 and leaves the existing
+file untouched.
 
 SAFETY: before running anything, a command whose text (case-insensitively)
 matches a destructive pattern is refused with a clear error and no artifact is
@@ -64,6 +68,10 @@ VERIFY_REL = Path("verify")
 DEFAULT_TIMEOUT = 900
 TAIL_LIMIT = 2000
 
+#: Distinct exit code for a refused/failed evidence write.  It must never be
+#: confused with a check failure (exit 1) or with a recorded timeout (124).
+EXIT_WRITE_REFUSED = 3
+
 # Case-insensitive destructive-command denylist (documented in the docstring).
 DENYLIST = (
     "sudo",
@@ -88,7 +96,8 @@ an active contract; index, undeclared and archive/** files are refused.
 ``--list`` prints ``id<TAB>cmd`` without running. ``--only`` (repeatable)
 selects individual checks. Default timeout 900s; a timeout records
 ``exit_code`` 124 and ``"timeout": true``. Exit 0 iff every selected check
-exited 0. Destructive commands are refused.
+exited 0; 3 when evidence cannot be written (foreign/corrupt existing record,
+failed readback). Destructive commands are refused.
 """
 
 
@@ -268,6 +277,85 @@ def as_text(value: object) -> str:
     return str(value)
 
 
+def canonical_json(value: object) -> str:
+    """Canonical serialization for payload comparison (sorted keys, UTF-8)."""
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+def guard_existing_evidence(out_file: Path, spec: Path, digest: str) -> None:
+    """Refuse to overwrite evidence that is not this spec's own.
+
+    ``verify/<id>.json`` is a flat store: two contracts declaring the same
+    ``dod.id`` would silently overwrite each other's evidence and one of them
+    could never reach DONE.  A record is this spec's own when its recorded
+    ``spec_sha256`` equals the current digest, or when its recorded ``spec``
+    path resolves to the spec being run (the ordinary re-run, including one
+    after the spec was edited and the old evidence went stale); overwriting is
+    then allowed.  A record of another spec, or a file that does not parse,
+    stops the run with ``EXIT_WRITE_REFUSED`` and is left byte-identical.
+    """
+    if not out_file.exists():
+        return
+    try:
+        existing = json.loads(out_file.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        die(
+            f"refusing to overwrite unparseable evidence {out_file}: {exc}; "
+            f"manual intervention required (flat {VERIFY_REL.as_posix()}/ store)",
+            EXIT_WRITE_REFUSED,
+        )
+    if not isinstance(existing, dict):
+        die(
+            f"refusing to overwrite evidence {out_file}: top-level JSON value is "
+            f"not an object; manual intervention required",
+            EXIT_WRITE_REFUSED,
+        )
+    same_spec = existing.get("spec_sha256") == digest
+    recorded = existing.get("spec")
+    if not same_spec and isinstance(recorded, str):
+        try:
+            same_spec = Path(recorded).expanduser().resolve() == spec.resolve()
+        except OSError:
+            same_spec = False
+    if not same_spec:
+        die(
+            f"refusing to overwrite evidence {out_file}: it belongs to another spec "
+            f"(spec={recorded!r}, spec_sha256={existing.get('spec_sha256')!r}); this is "
+            f"a flat {VERIFY_REL.as_posix()}/ store collision (a dod.id reused across "
+            f"contracts) -- resolve the id collision or migrate to namespaced evidence "
+            f"(P1-10); the existing file is left untouched",
+            EXIT_WRITE_REFUSED,
+        )
+
+
+def verify_readback(out_file: Path, record: dict) -> None:
+    """Read the just-written evidence back and require it to match ``record``.
+
+    The comparison is canonical (sorted keys, ``ensure_ascii=False``), so key
+    order and formatting cannot mask a mismatch.  A readback that fails to
+    read, parse or compare is a hard failure with ``EXIT_WRITE_REFUSED``: a
+    file that does not round-trip to the intended record is not evidence.
+    """
+    try:
+        written = out_file.read_bytes()
+    except OSError as exc:
+        die(f"evidence readback failed for {out_file}: {exc}", EXIT_WRITE_REFUSED)
+    try:
+        parsed = json.loads(written)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        die(
+            f"evidence readback failed for {out_file}: the written file does not "
+            f"parse ({exc}); the record is not accepted",
+            EXIT_WRITE_REFUSED,
+        )
+    if canonical_json(parsed) != canonical_json(record):
+        die(
+            f"evidence readback mismatch for {out_file}: the file does not "
+            f"round-trip to the intended record; the record is not accepted",
+            EXIT_WRITE_REFUSED,
+        )
+
+
 def run_check(root: Path, spec: Path, digest: str, check: dict, timeout: int, attestation: dict) -> dict:
     cmd = check["cmd"]
     matched = destructive_match(cmd)
@@ -320,9 +408,17 @@ def run_check(root: Path, spec: Path, digest: str, check: dict, timeout: int, at
     out_file = out_dir / f"{check['id']}.json"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_file.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except OSError as exc:
-        die(f"cannot write evidence {out_file}: {exc}")
+        die(f"cannot write evidence {out_file}: {exc}", EXIT_WRITE_REFUSED)
+
+    guard_existing_evidence(out_file, spec, digest)
+
+    payload = (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        spec_scope.atomic_write(out_file, payload)
+    except OSError as exc:
+        die(f"cannot write evidence {out_file}: {exc}", EXIT_WRITE_REFUSED)
+    verify_readback(out_file, record)
 
     record["_evidence"] = (VERIFY_REL / f"{check['id']}.json").as_posix()
     return record

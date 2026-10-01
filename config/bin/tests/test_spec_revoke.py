@@ -396,3 +396,48 @@ def test_revert_does_not_touch_verify(ws: Path) -> None:
     assert evidence.read_bytes() == before
     assert "verify" in result.stderr.lower()
     assert "stale" in result.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# Bare-token status line (no backticks): legacy/hand-edited approval
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status_line", "expected"),
+    [
+        ("- **Статус спецификации:** approved", "- **Статус спецификации:** `draft`"),
+        (
+            "-   **Статус спецификации:**   approved   ",
+            "-   **Статус спецификации:**   `draft`",
+        ),
+    ],
+)
+def test_bare_approved_token_is_reverted(ws: Path, status_line: str, expected: str) -> None:
+    project = ws / "proj"
+    spec_dir = project / ".slim" / "spec"
+    approvals = ws / "approvals"
+    alpha = make_draft(spec_dir / "alpha.md")
+    rec = approve_in_place(project, alpha, approvals)
+
+    text = alpha.read_text(encoding="utf-8")
+    text = text.replace(
+        "- **Статус спецификации:** `approved`   <!-- draft | approved -->",
+        f"{status_line}   <!-- draft | approved -->",
+        1,
+    )
+    assert "`approved`" not in text.split("<!--", 1)[0]
+    alpha.write_text(text, encoding="utf-8")
+
+    result = run(project, approvals, "alpha")
+
+    assert result.returncode == 0, result.stderr
+    updated = alpha.read_text(encoding="utf-8")
+    status_lines = [
+        line.strip()
+        for line in updated.split("<!--", 1)[0].splitlines()
+        if "Статус спецификации" in line
+    ]
+    assert status_lines == [expected.strip()]
+    assert "- **Утверждено:**" not in updated
+    assert not rec.exists()
