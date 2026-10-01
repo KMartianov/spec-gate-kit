@@ -1,0 +1,14 @@
+{
+  "check": "gate-parity-p0-docs-lint",
+  "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 python3 config/bin/docs-lint --spec gate-parity-p0",
+  "exit_code": 0,
+  "started_at": "2026-10-01T00:58:28.028308+00:00",
+  "finished_at": "2026-10-01T00:58:28.107657+00:00",
+  "duration_s": 0.079,
+  "spec": "/home/asdcxfrt/Projects/spec-gate-kit/.slim/spec/gate-parity-p0.md",
+  "spec_sha256": "97e291ac6486d900ef425bfff3119275577edd13a8108a9e14bd59c850650d1b",
+  "tail": "",
+  "git_head": "ddf3fa0de65eb57acdc302be6275b3ff0a4decf2",
+  "tree_dirty": false,
+  "scope_sha256": "1fbd2783f10305ba4918fa49562b5ecb02c2fe1d1b627a40207ac2db54559997"
+}
