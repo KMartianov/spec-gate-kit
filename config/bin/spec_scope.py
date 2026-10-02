@@ -25,8 +25,9 @@ Public surface (see the approved spec §3.8):
 
 Extra helpers used by the tools and the harness: ``scope_report``,
 ``find_valid_approval``, ``git_head``, ``tree_dirty``, ``worktree_snapshot``,
-``dod_check_ids`` (tolerant ``dod`` id parser), ``canon_command`` (shell-string
-canonicalisation for duplicate detection), ``command_kind`` and
+``dod_check_ids`` (tolerant ``dod`` id parser), ``norm_spec_path`` and
+``spec_rel`` (portable, dual-accept spec-path provenance), ``canon_command``
+(shell-string canonicalisation for duplicate detection), ``command_kind`` and
 ``is_heavy_command`` (command classification for the preflight/wave tools).
 
 Filesystem helpers shared by the CLI writers: ``find_root`` (nearest project
@@ -150,6 +151,47 @@ def atomic_write(target: Path, payload: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# Portable spec paths (dual-accept evidence/approval provenance)
+# ---------------------------------------------------------------------------
+
+
+def norm_spec_path(root: Path, recorded: object) -> Path:
+    """Resolve a recorded spec path: legacy absolute or root-relative.
+
+    A relative ``recorded`` path is anchored at ``root``, so a cloned tree
+    resolves its recorded ``.slim/spec/<name>.md`` against its own root.  The
+    input may be any JSON value: a non-string, empty or unresolvable value
+    normalizes to the resolved ``root`` directory, which can never equal a spec
+    *file*, so callers fail closed instead of raising.
+    """
+    if isinstance(recorded, str) and recorded:
+        try:
+            candidate = Path(recorded).expanduser()
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            return candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            pass
+    try:
+        return root.resolve()
+    except (OSError, RuntimeError):
+        return root
+
+
+def spec_rel(root: Path, spec: Path) -> str:
+    """Root-relative POSIX path of a spec (e.g. ``.slim/spec/<name>.md``).
+
+    ``root`` and ``spec`` are expected to be resolved paths (all callers pass
+    resolved values); a spec outside ``root`` falls back to its absolute string
+    so the helper stays total.
+    """
+    try:
+        return spec.relative_to(root).as_posix()
+    except ValueError:
+        return str(spec)
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +641,8 @@ def find_valid_approval(
     Requires the spec to be *active* (directly in ``.slim/spec``, GOV-3) and of
     class ``spec`` (GOV-7); the recorded sha256 must equal the current content.
     Archive and non-contract files never have an approval (retire без delete).
+    The recorded ``spec`` is accepted both as a legacy absolute path and as a
+    root-relative one (dual-accept, spec §3).
     """
     if spec is None:
         return None, None
@@ -623,11 +667,9 @@ def find_valid_approval(
         record_digest = record.get("spec_sha256")
         if not isinstance(spec_raw, str) or not isinstance(record_digest, str):
             continue
-        try:
-            recorded_spec = Path(spec_raw).expanduser().resolve()
-        except OSError:
-            continue
-        if recorded_spec != spec.resolve():
+        # Dual-accept (spec §3.1): a legacy absolute record resolves as-is, a
+        # root-relative one is anchored at ``root`` (portable across clones).
+        if norm_spec_path(root, spec_raw) != spec.resolve():
             continue
         if record_digest == digest:
             return record_file, record
@@ -644,6 +686,8 @@ def approved_scopes(
     ``scope`` fence (or with an invalid one) is still listed with ``scope=None``
     — it simply grants nothing (fail-closed).  Index/undeclared files and
     ``archive/**`` are filtered out by class and by location (GOV-3/GOV-7).
+    Records bind to a spec by digest; the recorded ``spec`` accepts both the
+    legacy absolute and the root-relative form (dual-accept, spec §3).
     """
     base = Path(approvals_dir) if approvals_dir is not None else APPROVALS_DIR
     out: dict[str, tuple[Path, Scope | None]] = {}
@@ -653,10 +697,10 @@ def approved_scopes(
         record_digest = record.get("spec_sha256")
         if not isinstance(spec_raw, str) or not isinstance(record_digest, str):
             continue
-        try:
-            spec = Path(spec_raw).expanduser().resolve()
-        except OSError:
-            continue
+        # Dual-accept (spec §3.1): drop the legacy try/resolve in favour of the
+        # total normalizer; an unresolvable record just leaves ``root`` and is
+        # filtered out below.
+        spec = norm_spec_path(root, spec_raw)
         if not is_active_spec(root, spec):
             continue
         try:
@@ -846,6 +890,7 @@ __all__ = [
     "glob_regex",
     "is_active_spec",
     "is_heavy_command",
+    "norm_spec_path",
     "now_iso",
     "parse_fences",
     "parse_scope",
@@ -858,6 +903,7 @@ __all__ = [
     "slugify",
     "spec_dir",
     "spec_files",
+    "spec_rel",
     "specs_and_indexes",
     "tracked_files",
     "tree_dirty",

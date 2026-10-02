@@ -131,7 +131,7 @@ def test_atomic_write_and_readback(project: Path) -> None:
     assert record["check"] == CHECK_ID
     assert record["cmd"] == "true"
     assert record["exit_code"] == 0
-    assert record["spec"] == str((project / ".slim" / "spec" / "alpha.md").resolve())
+    assert record["spec"] == ".slim/spec/alpha.md"  # root-relative since §3.1 (portable evidence)
     assert len(record["spec_sha256"]) == 64
     assert record["git_head"] is not None
     assert temp_leftovers(project / "verify") == []

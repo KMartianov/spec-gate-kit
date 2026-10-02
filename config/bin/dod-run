@@ -30,6 +30,9 @@ run's own build artifacts cannot influence it -- GOV-4):
      "spec", "spec_sha256", "tail",
      "git_head": "<40-hex|null>", "tree_dirty": <bool>, "scope_sha256": "<64-hex|null>"}
 
+``spec`` is the contract's root-relative POSIX path (``.slim/spec/<name>.md``),
+so evidence stays portable across clones; the overwrite guard still accepts
+records written by older versions (legacy absolute ``spec``, dual-accept).
 ``git_head`` is ``git rev-parse --verify HEAD`` (null outside a repo / without
 commits); ``tree_dirty`` is true when changes exist outside ``.slim/spec`` and
 ``verify``; ``scope_sha256`` digests the tracked files covered by the spec's
@@ -282,17 +285,34 @@ def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
-def guard_existing_evidence(out_file: Path, spec: Path, digest: str) -> None:
+def spec_matches(root: Path, recorded: object, spec: Path) -> bool:
+    """True when a recorded path (legacy absolute or root-relative) is this spec.
+
+    Dual-accept tie-breaker for :func:`guard_existing_evidence`, used only after
+    the primary ``spec_sha256`` identity check failed.  A non-string or empty
+    record, or any filesystem error, means "not this spec" (fail-closed: the
+    caller then refuses the overwrite).
+    """
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    try:
+        return spec_scope.norm_spec_path(root, recorded) == spec.resolve()
+    except OSError:
+        return False
+
+
+def guard_existing_evidence(out_file: Path, root: Path, spec: Path, digest: str) -> None:
     """Refuse to overwrite evidence that is not this spec's own.
 
     ``verify/<id>.json`` is a flat store: two contracts declaring the same
     ``dod.id`` would silently overwrite each other's evidence and one of them
     could never reach DONE.  A record is this spec's own when its recorded
     ``spec_sha256`` equals the current digest, or when its recorded ``spec``
-    path resolves to the spec being run (the ordinary re-run, including one
-    after the spec was edited and the old evidence went stale); overwriting is
-    then allowed.  A record of another spec, or a file that does not parse,
-    stops the run with ``EXIT_WRITE_REFUSED`` and is left byte-identical.
+    path points to the spec being run -- legacy absolute or root-relative
+    (dual-accept), the ordinary re-run including one after the spec was edited
+    and the old evidence went stale; overwriting is then allowed.  A record of
+    another spec, or a file that does not parse, stops the run with
+    ``EXIT_WRITE_REFUSED`` and is left byte-identical.
     """
     if not out_file.exists():
         return
@@ -312,11 +332,8 @@ def guard_existing_evidence(out_file: Path, spec: Path, digest: str) -> None:
         )
     same_spec = existing.get("spec_sha256") == digest
     recorded = existing.get("spec")
-    if not same_spec and isinstance(recorded, str):
-        try:
-            same_spec = Path(recorded).expanduser().resolve() == spec.resolve()
-        except OSError:
-            same_spec = False
+    if not same_spec:
+        same_spec = spec_matches(root, recorded, spec)
     if not same_spec:
         die(
             f"refusing to overwrite evidence {out_file}: it belongs to another spec "
@@ -393,7 +410,7 @@ def run_check(root: Path, spec: Path, digest: str, check: dict, timeout: int, at
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "duration_s": round(duration, 3),
-        "spec": str(spec),
+        "spec": spec_scope.spec_rel(root, spec),
         "spec_sha256": digest,
         "tail": output[-TAIL_LIMIT:],
         # Evidence v2 (GOV-4): the revision attestation captured before the run.
@@ -411,7 +428,7 @@ def run_check(root: Path, spec: Path, digest: str, check: dict, timeout: int, at
     except OSError as exc:
         die(f"cannot write evidence {out_file}: {exc}", EXIT_WRITE_REFUSED)
 
-    guard_existing_evidence(out_file, spec, digest)
+    guard_existing_evidence(out_file, root, spec, digest)
 
     payload = (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     try:
@@ -526,7 +543,7 @@ def main(argv: list[str]) -> int:
 
     if as_json:
         payload = {
-            "spec": str(spec),
+            "spec": spec_scope.spec_rel(root, spec),
             "spec_sha256": digest,
             "worktree": attestation,
             "results": [

@@ -27,6 +27,14 @@ Modes
     and undecodable binaries are skipped, and the checker skips itself as a
     note target because it holds the pattern as a checked sample.
 
+    In addition (contract ``portable-evidence-paths-p0`` §3.1) the ``spec``
+    field of every ``verify/**/*.json`` is inspected *as JSON* (never by
+    substring, so a home-absolute path inside a ``tail``/``note`` string
+    cannot raise a false positive).  A home-absolute ``spec`` that points at
+    an *active* contract is hard (exit 1); archive/notes, missing/unreadable
+    files and unparseable JSON are informational ``note:
+    <file> [evidence-inactive]`` only.
+
 ``config``
     Validates the shipped JSON snapshots (contract §3.2/§3.3):
 
@@ -93,6 +101,13 @@ HUMAN_ONLY_CLIS = ("spec-approve", "spec-revoke", "gate-off", "gate-on")
 
 INSTALL_SH = REPO_ROOT / "install.sh"
 VERSION_FILE = REPO_ROOT / "VERSION"
+
+# --- evidence scan (contract portable-evidence-paths-p0 §3.1) ---------------
+
+#: Per-check evidence records; only their JSON ``spec`` field is scanned.
+VERIFY_DIR = REPO_ROOT / "verify"
+#: The vendored governance helpers live next to this kit's CLIs.
+SPEC_SCOPE_BIN = CONFIG_DIR / "bin"
 
 #: Entries that must exist in a fresh ``install.sh --target DIR`` installation.
 INSTALL_EXPECTED = ("config", "README.md", "VERSION", ".slim/spec")
@@ -162,6 +177,13 @@ PATHS_HELP = """Mode paths:
   Scanned: config/** recursively plus README.md, install.sh, VERSION (absent
   optional files are not an error).  __pycache__/.pytest_cache/.git and
   undecodable binaries are skipped.
+
+  Additionally the JSON 'spec' field of every verify/**/*.json is inspected
+  (never a substring scan): a home-absolute 'spec' pointing at an ACTIVE
+  contract is a hard violation (exit 1); inactive/archived evidence, a missing
+  or non-string 'spec', and unparseable JSON are informational
+      note: <file> [evidence-inactive]
+  lines only and never change the exit code.
 """
 
 CONFIG_HELP = """Mode config:
@@ -288,6 +310,97 @@ def _string_values(node: object) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Evidence scan (contract portable-evidence-paths-p0 §3.1)
+# ---------------------------------------------------------------------------
+
+
+def _spec_scope_module() -> object | None:
+    """The vendored ``spec_scope`` helper, or ``None`` when unimportable.
+
+    ``spec_scope.py`` is a stdlib-only sibling of this checker (in
+    ``config/bin``); importing it keeps the activity predicate identical to
+    the governance tools (dual-accept ``norm_spec_path`` + ``is_active_spec``).
+    When the import is unavailable the scan degrades to the minimal vendored
+    fallback of :func:`_evidence_spec_active`.
+    """
+    bin_dir = str(SPEC_SCOPE_BIN)
+    if bin_dir not in sys.path:
+        sys.path.insert(0, bin_dir)
+    try:
+        import spec_scope  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    return spec_scope
+
+
+def _evidence_spec_active(root: Path, recorded: object, scope_module: object | None) -> bool:
+    """True iff ``recorded`` names an *existing active* contract (GOV-3).
+
+    Active = the spec file exists and lies directly in ``<root>/.slim/spec``;
+    ``archive/**``/``notes/**`` and missing files are inactive.  The primary
+    path reuses the governance helpers (dual-accept); the fallback inlines the
+    same predicate for a tree where ``config/bin/spec_scope.py`` is absent.
+    """
+    if scope_module is not None:
+        spec = scope_module.norm_spec_path(root, recorded)
+        try:
+            if not spec.is_file():
+                return False
+        except OSError:
+            return False
+        return bool(scope_module.is_active_spec(root, spec))
+    # Vendored fallback: parent == <root>/.slim/spec and the file exists.
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    try:
+        candidate = Path(recorded).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        spec_dir = (root / ".slim" / "spec").resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    try:
+        if not candidate.is_file():
+            return False
+        return candidate.parent == spec_dir
+    except OSError:
+        return False
+
+
+def scan_evidence() -> tuple[list[str], list[str]]:
+    """Field-level scan of ``verify/**/*.json``; returns (violations, notes).
+
+    Only the JSON ``spec`` value is inspected (never the raw bytes), so a
+    home-absolute path inside a ``tail`` log or a ``note`` string cannot raise
+    a false positive.  A home-absolute ``spec`` is hard **only** when it points
+    at an active contract; every other case (inactive/archived, ``notes/**``,
+    missing file, absent/non-string ``spec``, unparseable JSON) is a note.
+    An active, portable record is clean: neither a violation nor a note.
+    """
+    violations: list[str] = []
+    notes: list[str] = []
+    if not VERIFY_DIR.is_dir():
+        return violations, notes
+    scope_module = _spec_scope_module()
+    for path in sorted(VERIFY_DIR.rglob("*.json")):
+        if not path.is_file() or _is_skipped(path):
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        doc = load_json(path)
+        if not isinstance(doc, dict) or not isinstance(doc.get("spec"), str):
+            notes.append(f"note: {rel} [evidence-inactive]")
+            continue
+        recorded = doc["spec"]
+        active = _evidence_spec_active(REPO_ROOT, recorded, scope_module)
+        if active and FORBIDDEN_HOME in recorded:
+            violations.append(f"{rel} [active-evidence]")
+        elif not active:
+            notes.append(f"note: {rel} [evidence-inactive]")
+    return violations, notes
+
+
+# ---------------------------------------------------------------------------
 # Mode: paths
 # ---------------------------------------------------------------------------
 
@@ -306,20 +419,26 @@ def mode_paths() -> int:
             f"note: {rel}:{number} [{classify_note(path)}]"
             for number in find_needle(path, NOTE_NEEDLE)
         )
+    source_violations = len(violations)
+    evidence_violations, evidence_notes = scan_evidence()
+    violations.extend(evidence_violations)
+    notes.extend(evidence_notes)
     for violation in violations:
         print(violation)
     for note in notes:
         print(note)
     if violations:
         print(
-            f"check_portability: paths: FAIL ({len(violations)} occurrence(s) of the "
-            f"author-specific absolute-home literal; the kit must not reference the "
-            f"author's machine; {len(notes)} '{NOTE_NEEDLE}' note(s) are informational)"
+            f"check_portability: paths: FAIL ({source_violations} occurrence(s) of the "
+            f"author-specific absolute-home literal in shipped sources; "
+            f"{len(evidence_violations)} active evidence record(s) with a home-absolute "
+            f"'spec' field; the kit must not reference the author's machine; "
+            f"{len(notes)} note(s) are informational)"
         )
         return EXIT_VIOLATION
     print(
-        f"check_portability: paths: clean ({len(notes)} informational "
-        f"'{NOTE_NEEDLE}' occurrence(s))"
+        f"check_portability: paths: clean ({len(notes)} informational note(s): "
+        f"'{NOTE_NEEDLE}' occurrences and inactive/absent evidence)"
     )
     return EXIT_OK
 
