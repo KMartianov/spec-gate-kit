@@ -389,3 +389,17 @@ The deprecated, inert `.opencode/` pack was deleted; global skills live in
   launched with `--context ide` and assigned only to the agents that benefit.
 - **Built-in websearch** requires `OPENCODE_ENABLE_EXA=1` in the launch env.
 - **MCP changes require an OpenCode restart.**
+
+## Tamper-evidence boundary & release policy
+
+- **Audit journal is tamper-evident, not tamper-proof.** The `prev_hash` chain
+  (`audit-chain-p0`) detects accidental corruption, truncation and mid-file line
+  removal, but does **not** stop a malicious full rewrite by a process sharing the
+  file owner's UID. Resisting that is delegated to the host/OS and release practice:
+  `chattr +a` (settable only by root/`CAP_LINUX_IMMUTABLE`, filesystem-dependent, and
+  still permissive to *append* forgery), forwarding the journal to syslog/file-tail
+  configured **outside** the hook, and pinning release hashes in Git. The hook
+  performs **no** network or extra-file writes.
+- **Policy (d)-lite.** `verify/**` is tracked proof (schema v2), and "a release is not
+  a release until `git push`": the remote is the trust boundary, because a local
+  `.git` is rewritable by the same user.

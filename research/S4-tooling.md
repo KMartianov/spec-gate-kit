@@ -1,5 +1,10 @@
 # S4 — Tooling & Utilities Inventory + Gap Analysis (`spec-gate-kit`)
 
+> **Superseded (2026-10-02).** Written 2026-09-27, before the kit had a committed
+> baseline, CI, `VERSION`/`install.sh`, archived DONE contracts or the 2026-10-02
+> audits. Current picture: `research/SYNTHESIS.md` + `.slim/spec/notes/` (full-audit
+> and decisions, 2026-10-02). Kept as history — do not treat its *State* column as current.
+
 > Workstream S4 of the R&D plan (`research/README.md`). Owner: `@explorer` (session `ses_f0c982bd1ffeozH1E8FrnpyLHl`). Persisted by the orchestrator.
 
 **Scope:** machinery under `config/` (drop-in mirror of `~/.config/opencode/`), plus `docs/`/`research/` context. README §5 (P0/P1/P2) and `repo-audit-2026-09-29.md` §4 are the canonical backlog; this report maps *what exists*, *what is missing*, and *what a "factory" needs*. `git log` is empty, all files untracked — no committed baseline.
