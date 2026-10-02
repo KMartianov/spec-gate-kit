@@ -1,0 +1,14 @@
+{
+  "check": "audit-chain-p0-ts",
+  "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 node --test config/plugins/__tests__/spec-gate.test.ts",
+  "exit_code": 0,
+  "started_at": "2026-10-02T18:27:39.813324+00:00",
+  "finished_at": "2026-10-02T18:27:41.784834+00:00",
+  "duration_s": 1.971,
+  "spec": "/home/asdcxfrt/Projects/spec-gate-kit/.slim/spec/audit-chain-p0.md",
+  "spec_sha256": "869a306d73a85005bc8b06133e5ed5962592914df4e53da188fac2877fdd6a6a",
+  "tail": " a path in a gated project, after approval -> allowed (149.598859ms)\n✔ 4. serena-shaped relative_path on an unknown tool, no approval -> BLOCKED (2.035418ms)\n✔ 5. writer-by-name (replace_content) with unparseable args -> BLOCKED (fail-closed) (0.94336ms)\n✔ 6. non-writer unknown tool with NO path arg -> allowed (0.967595ms)\n✔ 7. exempt path under CONFIG_DIR -> allowed (2.504107ms)\n✔ 8. target under <root>/.serena/ -> allowed (1.22063ms)\n✔ 9. target in a gated project with <root>/.slim/GATE-OFF -> allowed (3.075018ms)\n✔ 10. OPENCODE_SPEC_GATE=off -> allowed even for a gated write, no approval (1.208898ms)\n✔ 11. target outside any gated project -> allowed (2.370196ms)\n✔ 12. audit JSONL gets a decision:allowed line for a successful gated write (142.477972ms)\n✔ 13. patch tool with zero parseable paths -> BLOCKED (fail-closed) (1.581787ms)\n✔ 14. v2 setup registers both execute.before and execute.after (1.917927ms)\n✔ 15. relative and ~ paths canonicalize correctly (0.869912ms)\n✔ 16. writer-by-name heuristic is case-insensitive and broad (0.474119ms)\n✔ 17. editing the spec invalidates an approval (140.667546ms)\n✔ 18. scope mandate: allow inside / no-mandate outside / deny wins over allow (146.229028ms)\n✔ 19. scope vectors parity: every pattern_case and scope_case matches TS (2.0154ms)\n✔ 20. approval-store isolation guard: the real approvals dir was not touched (1.458044ms)\n✔ 21. every audit record carries the chain fields; the single-process chain is linear from GENESIS (1.590333ms)\n✔ 22. canonicalization vectors parity: all canon_cases and chain_cases match TS byte-for-byte (1.07178ms)\n✔ 23. boot canary is written exactly once even when OPENCODE_SPEC_GATE=off (fresh process) (306.075808ms)\n✔ 24. legacy preamble is never rewritten; chain-start marker anchors it (fresh process) (289.690695ms)\n✔ 25. audit-journal isolation guard: the real journal was not touched (1.942163ms)\nℹ tests 25\nℹ suites 0\nℹ pass 25\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1708.075652\n",
+  "git_head": "cc689c4a1130838cb92b5d4b2f780f5882c63d3b",
+  "tree_dirty": false,
+  "scope_sha256": "5f8b1fb83ef9407bc51de18e0c441deca93e25ba95be938d747c8f1618330eb6"
+}
