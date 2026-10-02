@@ -13,7 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-CLI = Path("/home/asdcxfrt/.config/opencode/bin/spec-approve")
+BIN = Path(__file__).resolve().parents[1]  # config/bin (repo-local, never the live machine)
+CLI = BIN / "spec-approve"
 
 SCOPE_OK = '{"allow": ["src/**"], "deny": []}'
 DOD_OK = '{"checks": [{"id": "smoke", "cmd": "true"}]}'

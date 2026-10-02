@@ -40,7 +40,7 @@ ASan/UBSan, `nbval`, `sympy-verify`). Однако ничто не связыв�
    спецификацию, разбирает блок `dod`, выполняет каждую команду и пишет
    `<root>/verify/<id>.json` со схемой:
 
-   $$\texttt{\{check, cmd, exit\_code, started\_at, finished\_at, duration\_s, spec, spec\_sha256, tail\}}$$
+   $$\texttt{\{check, cmd, exit\_code, started\_at, finished\_at, duration\_s, spec, spec\_sha256, tail, git\_head, tree\_dirty, scope\_sha256\}}$$
 
    где `spec_sha256` — хеш байтов спецификации **на момент прогона**, а `tail` —
    последние ~2000 символов объединённого вывода. Код возврата `dod-run`: 0, если
@@ -56,7 +56,7 @@ ASan/UBSan, `nbval`, `sympy-verify`). Однако ничто не связыв�
 
    $$\text{DONE} \iff \text{валидное одобрение} \;\wedge\; \forall\, c \in \text{DoD}:\
    \text{verify}/c\text{.json}\ \text{существует} \wedge \text{exit}=0 \wedge
-   \text{spec\_sha256 совпадает}$$
+   \text{spec\_sha256 совпадает} \;\wedge\; \text{git\_head}=\text{HEAD} \;\wedge\; \lnot\text{tree\_dirty}$$
 
 5. **Защита от разрушительных команд.** Перед запуском `dod-run` отказывается
    выполнять команды из denylist (`sudo`, `mkfs`, `dd if=`, `rm -rf /`,

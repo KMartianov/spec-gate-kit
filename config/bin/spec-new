@@ -167,7 +167,7 @@ def render_readme(name: str, slug: str, spec_abs: Path) -> str:
 
 ## Development
 
-- Python: `/home/asdcxfrt/ml_base/.venv` (see `AGENTS.md`).
+- Python: `~/ml_base/.venv` (see `AGENTS.md`).
 - C++: CMake + CTest.
 
 ## Specification

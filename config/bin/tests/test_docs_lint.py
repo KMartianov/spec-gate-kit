@@ -15,9 +15,10 @@ from pathlib import Path
 
 import pytest
 
-CLI = Path("/home/asdcxfrt/.config/opencode/bin/docs-lint")
-DOD_RUN = Path("/home/asdcxfrt/.config/opencode/bin/dod-run")
-SPEC_STATUS = Path("/home/asdcxfrt/.config/opencode/bin/spec-status")
+BIN = Path(__file__).resolve().parents[1]  # config/bin (repo-local, never the live machine)
+CLI = BIN / "docs-lint"
+DOD_RUN = BIN / "dod-run"
+SPEC_STATUS = BIN / "spec-status"
 SCRATCH = Path("/tmp/opencode")
 
 DIATAXIS_DIRS = (
@@ -247,7 +248,7 @@ def test_sibling_tools_import(tool: Path, workdir: Path) -> None:
 def test_changed_clis_compile(tmp_path: Path) -> None:
     import py_compile
 
-    for tool in (CLI, Path("/home/asdcxfrt/.config/opencode/bin/spec-approve")):
+    for tool in (CLI, BIN / "spec-approve"):
         out = tmp_path / (tool.name + ".pyc")
         py_compile.compile(str(tool), cfile=str(out), doraise=True)
         assert out.is_file()

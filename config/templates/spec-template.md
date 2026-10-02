@@ -87,7 +87,7 @@ Glob-семантика: `*` — любая последовательность
 
 ```scope
 {
-  "allow": ["tools/<task>/**"],
+  "allow": ["tools/<task_slug>/**"],
   "deny": ["docs/**", "src/**", "tests/**"]
 }
 ```
@@ -144,9 +144,9 @@ Glob-семантика: `*` — любая последовательность
 ```dod
 {
   "checks": [
-    {"id": "build", "cmd": "cmake --build build --config Release"},
-    {"id": "test", "cmd": "ctest --test-dir build --output-on-failure"},
-    {"id": "asan", "cmd": "<команда сборки/прогона под AddressSanitizer+UBSan>"}
+    {"id": "<task_slug>-build", "cmd": "cmake --build build --config Release"},
+    {"id": "<task_slug>-test", "cmd": "ctest --test-dir build --output-on-failure"},
+    {"id": "<task_slug>-asan", "cmd": "<команда сборки/прогона под AddressSanitizer+UBSan>"}
   ]
 }
 ```

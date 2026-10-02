@@ -182,11 +182,11 @@ and is **always refused** for `docs/**`.
   and deliberately does **not** open `docs/**`.
 - **Rollback:** `rm ~/.config/opencode/plugins/spec-gate.ts` + restart.
 - **Honest limitation:** this is a **soft guardrail, not a security boundary** —
-  `bash` (`python -m *` is allowlisted) plus the `spec-new`/`dod-run` shell paths
-  all sit outside it. Residual risk: an MCP writer may pass a path that resolves
-  from its own server root rather than the session directory (serena
-  `relative_path`), so the checked path can differ from the written one.
-  Kernel-level read-only mounting belongs to the deferred oclab Stage 3.
+  `bash` (`python -m *` is allowlisted), Code-Mode `execute` and the
+  `spec-new`/`dod-run` shell paths all sit outside the gate. `execute` carries no
+  path args and is unmodeled; an MCP writer may resolve a path from its own server
+  root (serena `relative_path`), so the checked path can differ from the written
+  one. Kernel-level read-only mounting belongs to the deferred oclab Stage 3.
 
 ## Agents
 
@@ -372,12 +372,12 @@ The deprecated, inert `.opencode/` pack was deleted; global skills live in
     (`nice -n 19 taskset -c 0,1 <BIN>/dod-run …`) — строки `cmd` в спеках не менять.
   Жёсткий предел при необходимости: `systemd-run --user --scope -p CPUQuota=150% <cmd>`
   (`cpulimit` в системе отсутствует).
-- **Python env:** use `/home/asdcxfrt/ml_base/.venv` (Python 3.12). Missing there:
+- **Python env:** use `~/ml_base/.venv` (Python 3.12). Missing there:
   `pytest`, `cv2`, `transformers`, `datasets`, `wandb`, `mlflow` — add with
-  `uv pip install --python /home/asdcxfrt/ml_base/.venv/bin/python <pkg>`.
+  `uv pip install --python ~/ml_base/.venv/bin/python <pkg>`.
 - **Python env (правило приоритета):** env выбирается по корню проекта. Внутри
-  `/home/asdcxfrt/Projects/Diplom` действует только conda `optflow_env`
-  (`/home/asdcxfrt/.conda/envs/optflow_env`, Python 3.12.0, kernelspec ноутбуков
+  `~/Projects/Diplom` действует только conda `optflow_env`
+  (`~/.conda/envs/optflow_env`, Python 3.12.0, kernelspec ноутбуков
   `display_name: optflow_env`) — это же окружение поднимает `tools/jupyter_up.sh`.
   `~/ml_base/.venv` (Python 3.12.12, ядро `uv-ml-base`) — глобальный дефолт вне
   проекта Diplom; в задачах по Diplom его не использовать.

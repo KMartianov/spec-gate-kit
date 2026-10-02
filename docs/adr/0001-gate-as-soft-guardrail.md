@@ -47,7 +47,7 @@ Zero-Code Gate реализуется как **мягкий предохрани
    `<root>/.serena/` и маркер `<root>/.slim/GATE-OFF`.
 5. **Аудит.** Каждое решение в гейтед-проекте дописывается в
    `~/.local/share/opencode/audit/spec-gate.jsonl` строкой
-   `{"ts","sessionID","tool","targets","root","decision"}`.
+   `{"ts","sessionID","tool","targets","root","decision","reason","spec"}`.
 6. **Честная оговорка.** Гейт **не является границей безопасности** и не должен
    так подаваться: `permission.bash` допускает `python -m *`, поэтому запись
    мимо гейта возможна. Ценность гейта — трение и журнал, а не невозможность.

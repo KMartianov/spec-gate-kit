@@ -5,9 +5,7 @@
     "external_directory": {
       "*": "deny",
       "~/Projects/**": "allow",
-      "~/.config/opencode/**": "allow",
-      "/tmp/opencode/**": "allow",
-      "/home/asdcxfrt/ml_base/**": "allow"
+      "/tmp/opencode/**": "allow"
     },
     "bash": {
       "*": "ask",
@@ -320,7 +318,7 @@
     "serena": {
       "type": "local",
       "command": [
-        "/home/asdcxfrt/.local/bin/serena",
+        "serena",
         "start-mcp-server",
         "--context",
         "ide",

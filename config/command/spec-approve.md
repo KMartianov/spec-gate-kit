@@ -6,7 +6,7 @@ description: Утвердить .slim/spec (человеческий Zero-Code G
 
 Аргументы: `$ARGUMENTS`
 
-!`/home/asdcxfrt/.config/opencode/bin/spec-approve $ARGUMENTS`
+!`~/.config/opencode/bin/spec-approve $ARGUMENTS`
 
 Формы вызова:
 

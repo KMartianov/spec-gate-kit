@@ -2,13 +2,13 @@
   "check": "evidence-atomic-p0-pytest",
   "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 python3 -m pytest config/bin/tests/test_dod_run.py config/bin/tests/test_spec_revoke.py -q",
   "exit_code": 0,
-  "started_at": "2026-10-01T00:58:28.197752+00:00",
-  "finished_at": "2026-10-01T00:58:30.922318+00:00",
-  "duration_s": 2.725,
+  "started_at": "2026-10-01T00:58:47.662972+00:00",
+  "finished_at": "2026-10-01T00:58:50.347385+00:00",
+  "duration_s": 2.684,
   "spec": "/home/asdcxfrt/Projects/spec-gate-kit/.slim/spec/evidence-atomic-p0.md",
   "spec_sha256": "6ec6c273a5b7bdbfa7f0571bc09e290dda8ccff0c665902dc7ca6a323fec0808",
-  "tail": "......................                                                   [100%]\n22 passed in 2.28s\n",
-  "git_head": "ddf3fa0de65eb57acdc302be6275b3ff0a4decf2",
+  "tail": "......................                                                   [100%]\n22 passed in 2.24s\n",
+  "git_head": "f9849977557eb851571c2bee513c1b915d1b5c4a",
   "tree_dirty": false,
   "scope_sha256": "da91d1b2de60243cb2741d5a6b6645cbf996f308e9dc9b223c1b73b58d66ca71"
 }
