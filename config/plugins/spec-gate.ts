@@ -31,8 +31,11 @@
  *
  * Every terminal decision for a *gated* call is appended to
  * `~/.local/share/opencode/audit/spec-gate.jsonl` (JSONL) as
- * `{ts, sessionID, tool, targets, root, decision, reason, spec}`. Audit failure
- * is never allowed to change the gate decision (fail-open).
+ * `{ts, sessionID, tool, targets, root, decision, reason, spec}` plus the
+ * additive tamper-evident chain fields `{prev_hash, entry_hash, pid, seq,
+ * plugin}`. A boot canary is written once per process (even under the kill
+ * switch), so presence is distinguishable from a silent no-op. Audit failure is
+ * never allowed to change the gate decision (fail-open).
  *
  * Fail-open on internal errors, fail-closed only on genuinely gated writes and
  * on writers whose file targets cannot be parsed at all.
@@ -42,14 +45,36 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import * as os from "node:os"
 import { createHash } from "node:crypto"
+import { fileURLToPath } from "node:url"
 import type { Plugin, Hooks } from "@opencode-ai/plugin"
 
 const HOME = os.homedir()
 const CONFIG_DIR = path.join(HOME, ".config", "opencode")
 const APPROVALS_DIR = path.join(HOME, ".local", "share", "opencode", "approvals")
 const AUDIT_DIR = path.join(HOME, ".local", "share", "opencode", "audit")
-const AUDIT_FILE = path.join(AUDIT_DIR, "spec-gate.jsonl")
+/**
+ * Journal path. `$HOME`-relative by default (the test harness isolates by
+ * redirecting `HOME`/`XDG_DATA_HOME` before import); `OPENCODE_SPEC_GATE_AUDIT_FILE`
+ * overrides it explicitly (spec §3.8).
+ */
+const AUDIT_FILE =
+  process.env.OPENCODE_SPEC_GATE_AUDIT_FILE && process.env.OPENCODE_SPEC_GATE_AUDIT_FILE.length > 0
+    ? path.resolve(process.env.OPENCODE_SPEC_GATE_AUDIT_FILE)
+    : path.join(AUDIT_DIR, "spec-gate.jsonl")
 const TMP_DIR = "/tmp/opencode"
+
+/**
+ * First 16 hex of `sha256` over this plugin file's own bytes, computed once at
+ * module load (spec §3.2 / §3.8). Written into every record as `plugin`.
+ */
+const PLUGIN_ID: string = (() => {
+  try {
+    const selfPath = fileURLToPath(import.meta.url)
+    return createHash("sha256").update(fs.readFileSync(selfPath)).digest("hex").slice(0, 16)
+  } catch {
+    return "0000000000000000"
+  }
+})()
 const APPROVER = path.join(CONFIG_DIR, "bin", "spec-approve")
 const SPEC_REL = path.join(".slim", "spec")
 const OFF_MARKER_REL = path.join(".slim", "GATE-OFF")
@@ -785,14 +810,266 @@ interface AuditEntry {
   spec: string | null
 }
 
+/** Tail classification for `prev_hash` selection (spec §3.4). */
+type TailInfo = { kind: "hash"; hash: string } | { kind: "chainless" } | { kind: "unreadable" }
+
+const GENESIS = "GENESIS"
+const DETACHED = "DETACHED"
+const TAIL_CHUNK = 64 * 1024
+const BOOT_REASON_PREFIX = "audit:boot"
+const CHAIN_START_REASON_PREFIX = "audit:chain-start"
+
+/** In-process cache of the last head we wrote (spec §3.4). */
+let inProcessLastHash: string | null = null
+/** Boot is written lazily, exactly once per process (spec §3.5). */
+let bootWritten = false
+/** `seq` counter for ordinary records: 0 is reserved for boot/marker. */
+let chainSeq = 0
+
 /**
- * Append one JSONL audit record. NEVER throws and NEVER changes the gate
- * decision: an unwritable audit dir is reported on stderr and ignored.
+ * Recursively sort object keys, preserving array order — the TS half of the
+ * normative `canon` (spec §3.1). `JSON.stringify` supplies the compact,
+ * whitespace-free separators; non-ASCII is emitted as raw UTF-8.
+ */
+function sortValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortValue)
+  if (value !== null && typeof value === "object") {
+    const src = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(src).sort()) out[key] = sortValue(src[key])
+    return out
+  }
+  return value
+}
+
+/**
+ * $\operatorname{canon}(e)$: compact-sorted JSON of `e` without `entry_hash`
+ * (spec §3.1). `prev_hash` and the literal `ts` are included as written.
+ */
+function canonEntry(entry: Record<string, unknown>): string {
+  const payload: Record<string, unknown> = {}
+  for (const key of Object.keys(entry)) {
+    if (key === "entry_hash") continue
+    payload[key] = entry[key]
+  }
+  return JSON.stringify(sortValue(payload))
+}
+
+/**
+ * $H_n = \operatorname{sha256}(\operatorname{prev}_n \Vert
+ * \operatorname{canon}(\operatorname{entry}_n))$ as hex (spec §3.1).
+ */
+function chainEntryHash(prev: string, entry: Record<string, unknown>): string {
+  return createHash("sha256").update(prev, "utf8").update(canonEntry(entry), "utf8").digest("hex")
+}
+
+/** Classify one serialized journal line as a chain tail (spec §3.4). */
+function classifyTailLine(line: string): TailInfo {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return { kind: "unreadable" }
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { kind: "unreadable" }
+  }
+  const hash = (parsed as Record<string, unknown>).entry_hash
+  if (typeof hash === "string" && hash.length > 0) return { kind: "hash", hash }
+  return { kind: "chainless" }
+}
+
+/** Last non-empty line of the whole journal (fallback for huge single lines). */
+function readTailHashFull(): TailInfo {
+  let raw: Buffer
+  try {
+    raw = fs.readFileSync(AUDIT_FILE)
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? { kind: "chainless" } : { kind: "unreadable" }
+  }
+  const lines = raw.toString("utf8").split("\n")
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+  if (lines.length === 0) return { kind: "chainless" }
+  return classifyTailLine(lines[lines.length - 1])
+}
+
+/**
+ * Read the journal tail and return the head we must chain from (spec §3.4):
+ * a hash, `chainless` (no chain record: legacy or a fresh file) or `unreadable`
+ * (a partial/corrupt tail must never be mistaken for a fresh file).
+ */
+function readTailHash(): TailInfo {
+  let fd: number | null = null
+  try {
+    const stat = fs.statSync(AUDIT_FILE)
+    if (!stat.isFile() || stat.size === 0) return { kind: "chainless" }
+    const start = Math.max(0, stat.size - TAIL_CHUNK)
+    const length = stat.size - start
+    fd = fs.openSync(AUDIT_FILE, "r")
+    const buf = Buffer.alloc(length)
+    fs.readSync(fd, buf, 0, length, start)
+    let text = buf.toString("utf8")
+    if (start > 0) {
+      const nl = text.indexOf("\n")
+      if (nl === -1) {
+        fs.closeSync(fd)
+        fd = null
+        return readTailHashFull()
+      }
+      text = text.slice(nl + 1)
+    }
+    const lines = text.split("\n")
+    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+    if (lines.length === 0) return { kind: "chainless" }
+    return classifyTailLine(lines[lines.length - 1])
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? { kind: "chainless" } : { kind: "unreadable" }
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/**
+ * Legacy preamble facts for the `chain-start` marker (spec §3.3):
+ * number of lines, the last line's literal `ts` and the `sha256` of its bytes
+ * without the trailing newline.
+ */
+function legacyInfo(): { count: number; tailTs: string; tailSha256: string } {
+  let raw: Buffer
+  try {
+    raw = fs.readFileSync(AUDIT_FILE)
+  } catch {
+    return { count: 0, tailTs: "-", tailSha256: "-" }
+  }
+  const lines = raw.toString("utf8").split("\n")
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop()
+  if (lines.length === 0) return { count: 0, tailTs: "-", tailSha256: "-" }
+  const last = lines[lines.length - 1]
+  let tailTs = "-"
+  try {
+    const parsed = JSON.parse(last)
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const ts = (parsed as Record<string, unknown>).ts
+      if (typeof ts === "string") tailTs = ts
+    }
+  } catch {
+    /* keep "-" */
+  }
+  const tailSha256 = createHash("sha256").update(Buffer.from(last, "utf8")).digest("hex")
+  return { count: lines.length, tailTs, tailSha256 }
+}
+
+/** Append one serialized record; the caller owns the fail-open wrapper. */
+function appendRecord(record: Record<string, unknown>): void {
+  fs.mkdirSync(path.dirname(AUDIT_FILE), { recursive: true })
+  fs.appendFileSync(AUDIT_FILE, JSON.stringify(record) + "\n", "utf8")
+}
+
+/**
+ * Write the one-off `chain-start` marker that anchors the legacy preamble
+ * (spec §3.3). Legacy lines are never rewritten: the marker is appended after
+ * them and carries their size and tail hash.
+ */
+function writeChainStart(sessionID: string): void {
+  const legacy = legacyInfo()
+  const reason =
+    `${CHAIN_START_REASON_PREFIX} legacy_lines=${legacy.count} ` +
+    `legacy_tail_ts=${legacy.tailTs} legacy_tail_sha256=${legacy.tailSha256}`
+  const record: Record<string, unknown> = {
+    ts: new Date().toISOString(),
+    sessionID,
+    tool: "spec-gate",
+    targets: [],
+    root: "",
+    decision: "allowed",
+    reason,
+    spec: null,
+    prev_hash: GENESIS,
+    entry_hash: "",
+    pid: process.pid,
+    seq: 0,
+    plugin: PLUGIN_ID,
+  }
+  const hash = chainEntryHash(GENESIS, record)
+  record.entry_hash = hash
+  appendRecord(record)
+  inProcessLastHash = hash
+}
+
+/**
+ * Append one chained record (spec §3.2-§3.4). `prev = tailHash ?? inProcessLastHash
+ * ?? DETACHED`; a chainless tail first gets its `chain-start` marker, whose hash
+ * then becomes the in-process head.
+ */
+function appendChained(entry: AuditEntry, seq: number): void {
+  const tail = readTailHash()
+  if (tail.kind === "chainless") writeChainStart(entry.sessionID)
+  const prev = tail.kind === "hash" ? tail.hash : inProcessLastHash ?? DETACHED
+  const record: Record<string, unknown> = {
+    ts: entry.ts,
+    sessionID: entry.sessionID,
+    tool: entry.tool,
+    targets: entry.targets,
+    root: entry.root,
+    decision: entry.decision,
+    reason: entry.reason,
+    spec: entry.spec,
+    prev_hash: prev,
+    entry_hash: "",
+    pid: process.pid,
+    seq,
+    plugin: PLUGIN_ID,
+  }
+  const hash = chainEntryHash(prev, record)
+  record.entry_hash = hash
+  appendRecord(record)
+  inProcessLastHash = hash
+}
+
+/**
+ * Boot canary (spec §3.5): lazily, exactly once per process, **before** the kill
+ * switch is consulted. It chains on ordinary terms; `seq` 0 is reserved.
+ */
+function ensureBoot(sessionID: string): void {
+  if (bootWritten) return
+  bootWritten = true
+  try {
+    const kill = process.env.OPENCODE_SPEC_GATE === "off" ? "on" : "off"
+    appendChained(
+      {
+        ts: new Date().toISOString(),
+        sessionID,
+        tool: "spec-gate",
+        targets: [],
+        root: "",
+        decision: "allowed",
+        reason: `${BOOT_REASON_PREFIX} kill=${kill} plugin=${PLUGIN_ID} pid=${process.pid}`,
+        spec: null,
+      },
+      0,
+    )
+  } catch (err) {
+    // Fail-open: a boot write error must never change the gate verdict.
+    process.stderr.write(`[spec-gate] audit boot write failed: ${String(err)}\n`)
+  }
+}
+
+/**
+ * Append one JSONL audit record, now as a link in the `prev_hash` chain
+ * (spec §3.2-§3.5). NEVER throws and NEVER changes the gate decision: an
+ * unwritable audit dir is reported on stderr and ignored (fail-open).
  */
 function audit(entry: AuditEntry): void {
   try {
-    fs.mkdirSync(AUDIT_DIR, { recursive: true })
-    fs.appendFileSync(AUDIT_FILE, JSON.stringify(entry) + "\n", "utf8")
+    ensureBoot(entry.sessionID)
+    chainSeq += 1
+    appendChained(entry, chainSeq)
   } catch (err) {
     process.stderr.write(`[spec-gate] audit write failed: ${String(err)}\n`)
   }
@@ -803,7 +1080,11 @@ function audit(entry: AuditEntry): void {
 // ---------------------------------------------------------------------------
 
 function evaluate(input: { tool: string; sessionID: string }, output: { args: unknown }, directory: string): void {
-  // 1. Kill switch: no work, no audit.
+  // 0. Boot canary: provenance of presence, written once per process BEFORE the
+  //    kill switch, so a deliberate shutdown is no longer invisible (§3.5).
+  ensureBoot(input.sessionID)
+
+  // 1. Kill switch: no gating work and no verdict audit (boot already logged).
   if (process.env.OPENCODE_SPEC_GATE === "off") return
 
   // 2. Read-only allowlist.
@@ -969,6 +1250,11 @@ export const __test = {
   evaluate,
   blockGated,
   posixRelative,
+  canon: canonEntry,
+  entryHash: chainEntryHash,
+  pluginId: PLUGIN_ID,
+  GENESIS,
+  DETACHED,
   // normative snake_case aliases (spec §3.2.4 / I-3)
   parse_fences: parseFences,
   declared_token: declaredToken,

@@ -27,7 +27,8 @@
 
 import test, { after } from "node:test"
 import assert from "node:assert/strict"
-import { execFileSync } from "node:child_process"
+import { execFileSync, spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import {
   appendFileSync,
   existsSync,
@@ -50,6 +51,7 @@ const PLUGIN = path.resolve(HERE, "..", "spec-gate.ts")
 const REPO_ROOT = path.resolve(HERE, "..", "..", "..")
 const CLI = path.join(REPO_ROOT, "config", "bin", "spec-approve")
 const VECTORS_FILE = path.join(REPO_ROOT, "config", "tools", "gov", "scope_vectors.json")
+const AUDIT_VECTORS_FILE = path.join(REPO_ROOT, "config", "tools", "gov", "audit_vectors.json")
 
 // --- real approvals dir snapshot (captured BEFORE the HOME redirect) -------
 
@@ -70,6 +72,8 @@ function snapshotTree(dir: string): string[] {
 const REAL_HOME = homedir()
 const REAL_APPROVALS_DIR = path.join(REAL_HOME, ".local", "share", "opencode", "approvals")
 const REAL_APPROVALS_BEFORE = snapshotTree(REAL_APPROVALS_DIR)
+const REAL_AUDIT_DIR = path.join(REAL_HOME, ".local", "share", "opencode", "audit")
+const REAL_AUDIT_BEFORE = snapshotTree(REAL_AUDIT_DIR)
 
 // --- temp HOME + projects, then dynamic import of the plugin ---------------
 
@@ -92,6 +96,48 @@ const __test = mod.__test as Record<string, any>
 
 const AUDIT_FILE = __test.AUDIT_FILE as string
 const APPROVER = __test.APPROVER as string
+
+// --- fresh-process child (boot canary / legacy marker) ----------------------
+//
+// Boot is exactly-once-per-process, so the only honest way to exercise it under
+// a temporarily set `OPENCODE_SPEC_GATE=off` (and the `chain-start` marker on a
+// legacy journal) is a fresh `node` process whose `HOME` is its own temp dir.
+
+const CHILD_SCRIPT = path.join(BASE, "audit-child.mjs")
+writeFileSync(
+  CHILD_SCRIPT,
+  [
+    'import { pathToFileURL } from "node:url"',
+    "const mod = await import(pathToFileURL(process.env.CHILD_PLUGIN).href)",
+    "const hooks = await mod.SpecGate({ directory: process.env.CHILD_DIR })",
+    'const before = hooks["tool.execute.before"]',
+    "await before(",
+    '  { tool: "edit", sessionID: "ses_child", callID: "call_child" },',
+    "  { args: { filePath: process.env.CHILD_TARGET } },",
+    ")",
+    'process.stdout.write("CHILD_OK\\n")',
+    "",
+  ].join("\n"),
+  "utf8",
+)
+
+/** Child env with its own isolated HOME and no inherited test overrides. */
+function childEnv(home: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    XDG_DATA_HOME: path.join(home, ".local", "share"),
+    CHILD_PLUGIN: PLUGIN,
+  }
+  delete env.OPENCODE_SPEC_GATE
+  delete env.OPENCODE_SPEC_GATE_AUDIT_FILE
+  return { ...env, ...extra }
+}
+
+function runChild(env: NodeJS.ProcessEnv): void {
+  const res = spawnSync(process.execPath, [CHILD_SCRIPT], { env, encoding: "utf8" })
+  assert.equal(res.status, 0, `child failed (status ${res.status}):\n${res.stdout}\n${res.stderr}`)
+}
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -393,4 +439,155 @@ test("20. approval-store isolation guard: the real approvals dir was not touched
   const isolated = snapshotTree(APPROVALS_DIR)
   assert.ok(isolated.some((name) => name.endsWith(".json")), "expected at least one isolated approval record")
   assert.notEqual(path.resolve(APPROVALS_DIR), path.resolve(REAL_APPROVALS_DIR))
+})
+
+// --- audit chain (§3.9) -----------------------------------------------------
+
+test("21. every audit record carries the chain fields; the single-process chain is linear from GENESIS", () => {
+  const lines = auditLines()
+  assert.ok(lines.length >= 2, `expected the isolated journal to have records, got ${lines.length}`)
+  const records = lines.map((line) => JSON.parse(line))
+
+  const markerIndex = records.findIndex((r) => typeof r.entry_hash === "string" && r.entry_hash.length > 0)
+  assert.ok(markerIndex >= 0, "expected a chain root (GENESIS marker) in the isolated journal")
+
+  // Every chained record has the additive fields and replays to its entry_hash.
+  let expectedPrev = "GENESIS"
+  for (let i = markerIndex; i < records.length; i++) {
+    const r = records[i]
+    assert.equal(r.prev_hash, expectedPrev, `record ${i}: prev_hash must extend the previous entry_hash`)
+    assert.match(r.entry_hash, /^[0-9a-f]{64}$/, `record ${i}: entry_hash must be 64 hex`)
+    assert.equal(r.pid, process.pid, `record ${i}: pid is this process`)
+    assert.equal(typeof r.seq, "number", `record ${i}: seq is a number`)
+    assert.match(r.plugin, /^[0-9a-f]{16}$/, `record ${i}: plugin is 16 hex`)
+    assert.equal(__test.entryHash(r.prev_hash, r), r.entry_hash, `record ${i}: entry_hash must replay`)
+    expectedPrev = r.entry_hash
+  }
+
+  // Legacy lines (if any) must precede the marker and must never carry chain fields.
+  for (let i = 0; i < markerIndex; i++) {
+    assert.equal(records[i].entry_hash, undefined, `legacy record ${i} must not carry entry_hash`)
+  }
+
+  // Exactly one boot record per process, chaining on ordinary terms.
+  const boots = records.filter((r) => typeof r.reason === "string" && r.reason.startsWith("audit:boot"))
+  assert.equal(boots.length, 1, "boot must be written exactly once per process")
+  assert.match(boots[0].reason, /^audit:boot kill=(on|off) plugin=[0-9a-f]{16} pid=\d+$/)
+  assert.equal(boots[0].seq, 0)
+  assert.deepEqual(boots[0].targets, [])
+  assert.equal(boots[0].decision, "allowed")
+})
+
+test("22. canonicalization vectors parity: all canon_cases and chain_cases match TS byte-for-byte", () => {
+  const vectors = JSON.parse(readFileSync(AUDIT_VECTORS_FILE, "utf8"))
+  assert.equal(vectors.version, 1)
+  assert.ok(Array.isArray(vectors.canon_cases) && vectors.canon_cases.length > 0)
+  assert.ok(Array.isArray(vectors.chain_cases) && vectors.chain_cases.length > 0)
+
+  const ids = new Set<string>()
+  for (const c of vectors.canon_cases) {
+    assert.ok(!ids.has(c.id), `duplicate vector id: ${c.id}`)
+    ids.add(c.id)
+    const got = __test.canon(c.entry)
+    assert.equal(got, c.canon, `canon_case ${c.id}`)
+    assert.equal(Buffer.byteLength(got, "utf8"), Buffer.byteLength(c.canon, "utf8"), `canon_case ${c.id}: byte length`)
+  }
+  for (const c of vectors.chain_cases) {
+    assert.ok(!ids.has(c.id), `duplicate vector id: ${c.id}`)
+    ids.add(c.id)
+    assert.match(c.entry_hash, /^[0-9a-f]{64}$/)
+    assert.equal(__test.entryHash(c.prev, c.entry), c.entry_hash, `chain_case ${c.id}`)
+  }
+
+  // Required pins: a Cyrillic raw-UTF-8 case and an ordered multi-target case.
+  const cyrillic = vectors.canon_cases.find((c: { id: string }) => c.id === "cyrillic-utf8-raw")
+  assert.ok(cyrillic, "the cyrillic-utf8-raw case must exist")
+  assert.ok(cyrillic.canon.includes("Кириллица"), "Cyrillic must be pinned raw, not \\uXXXX")
+  const multi = vectors.canon_cases.find((c: { entry: { targets?: unknown[] } }) => (c.entry.targets ?? []).length >= 2)
+  assert.ok(multi, "an ordered multi-target case must exist")
+})
+
+test("23. boot canary is written exactly once even when OPENCODE_SPEC_GATE=off (fresh process)", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "spec-gate-bootoff-"))
+  const proj = path.join(home, "proj")
+  mkdirSync(path.join(proj, "src"), { recursive: true })
+  const journal = path.join(home, ".local", "share", "opencode", "audit", "spec-gate.jsonl")
+  try {
+    runChild(
+      childEnv(home, {
+        CHILD_DIR: proj,
+        CHILD_TARGET: path.join(proj, "src", "a.ts"),
+        OPENCODE_SPEC_GATE: "off",
+      }),
+    )
+    const records = readFileSync(journal, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    const boots = records.filter((r) => r.reason.startsWith("audit:boot"))
+    assert.equal(boots.length, 1, "boot must be written exactly once under the kill switch")
+    assert.match(boots[0].reason, /^audit:boot kill=on plugin=[0-9a-f]{16} pid=\d+$/)
+    assert.equal(boots[0].seq, 0)
+    // Off suppresses verdicts: the journal is just the marker + boot canary.
+    assert.equal(records.length, 2, "kill switch must not emit decision records")
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("24. legacy preamble is never rewritten; chain-start marker anchors it (fresh process)", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "spec-gate-legacy-"))
+  const proj = path.join(home, "proj")
+  mkdirSync(path.join(proj, "src"), { recursive: true })
+  const auditDir = path.join(home, ".local", "share", "opencode", "audit")
+  mkdirSync(auditDir, { recursive: true })
+  const journal = path.join(auditDir, "spec-gate.jsonl")
+
+  const legacy = [
+    { ts: "2026-09-30T23:59:58Z", sessionID: "ses_legacy", tool: "edit", targets: ["old/a.py"], root: "/old", decision: "allowed", reason: "allowed-via:old", spec: null },
+    { ts: "2026-09-30T23:59:59Z", sessionID: "ses_legacy", tool: "write", targets: ["old/b.py"], root: "/old", decision: "blocked", reason: "deny:docs/**", spec: null },
+  ]
+  const legacyBytes = Buffer.from(legacy.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8")
+  writeFileSync(journal, legacyBytes)
+  try {
+    runChild(childEnv(home, { CHILD_DIR: proj, CHILD_TARGET: path.join(proj, "src", "a.ts") }))
+
+    const raw = readFileSync(journal)
+    assert.ok(
+      raw.subarray(0, legacyBytes.length).equals(legacyBytes),
+      "legacy preamble bytes must be untouched",
+    )
+
+    const records = raw.toString("utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    const marker = records.find((r) => typeof r.reason === "string" && r.reason.startsWith("audit:chain-start"))
+    assert.ok(marker, "a chain-start marker must be appended after the legacy preamble")
+    assert.equal(marker.prev_hash, "GENESIS")
+    assert.equal(marker.seq, 0)
+    assert.equal(marker.tool, "spec-gate")
+    const tailSha = createHash("sha256").update(Buffer.from(JSON.stringify(legacy[legacy.length - 1]), "utf8")).digest("hex")
+    assert.equal(
+      marker.reason,
+      `audit:chain-start legacy_lines=2 legacy_tail_ts=2026-09-30T23:59:59Z legacy_tail_sha256=${tailSha}`,
+    )
+    assert.equal(typeof marker.entry_hash, "string")
+    assert.equal(__test.entryHash(marker.prev_hash, marker), marker.entry_hash)
+
+    // The boot canary chains from the marker on ordinary terms.
+    const boot = records.find((r) => typeof r.reason === "string" && r.reason.startsWith("audit:boot"))
+    assert.ok(boot, "boot canary must follow the marker")
+    assert.equal(boot.prev_hash, marker.entry_hash)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test("25. audit-journal isolation guard: the real journal was not touched", () => {
+  assert.ok(AUDIT_FILE.startsWith(FAKE_HOME + path.sep), "AUDIT_FILE must live under the redirected temp HOME")
+  assert.notEqual(
+    path.resolve(AUDIT_FILE),
+    path.resolve(path.join(REAL_AUDIT_DIR, "spec-gate.jsonl")),
+    "AUDIT_FILE must not be the real live journal",
+  )
+  assert.deepEqual(
+    snapshotTree(REAL_AUDIT_DIR),
+    REAL_AUDIT_BEFORE,
+    "the real audit directory changed during this run",
+  )
 })

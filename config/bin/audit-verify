@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+r"""Verify the tamper-evident hash chain of the spec-gate audit journal.
+
+Usage:
+    audit-verify [<journal-path>] [--json] [--quiet] [--help]
+
+The journal is JSON Lines.  Everything before the first line carrying an
+``entry_hash`` is the *legacy preamble*: it is never rewritten and never
+chain-checked, only counted.  From that marker on, every line must be one JSON
+object whose ``entry_hash`` replays as
+
+$$H_n = \operatorname{sha256}\big(\operatorname{prev}_n \,\Vert\,
+\operatorname{canon}(\operatorname{entry}_n)\big)$$
+
+with
+
+$$\operatorname{canon}(e) =
+\operatorname{UTF\text{-}8}\big(\text{compact-sorted}\big(
+e \setminus \{\texttt{entry\_hash}\}\big)\big)$$
+
+i.e. ``json.dumps(e, sort_keys=True, ensure_ascii=False,
+separators=(",", ":"))`` encoded as UTF-8.  ``prev_hash`` is the previous
+entry's hash, ``GENESIS`` (a chain root / ``chain-start`` marker) or
+``DETACHED`` (the tail was unreadable; legal).  Forks -- two entries extending
+the same head -- are legal: this CLI is fork-tolerant and lists them instead of
+failing.  ``entry_hash`` replay also detects any mid-file byte tampering.
+
+Exit codes:
+    0   no gaps: the whole chain replays (forks and ``DETACHED`` do not fail)
+    1   a gap: dangling ``prev_hash``, ``entry_hash`` replay mismatch, or an
+        unparseable line after the marker (all listed in the report)
+    2   no chain marker found, or a usage / IO error
+
+The tool is READ-ONLY: it never writes, creates or locks anything.  When no
+path is given it reports on the live journal
+``~/.local/share/opencode/audit/spec-gate.jsonl``; tests always pass an
+explicit fixture path.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # stay strictly read-only
+
+HOME = Path(os.path.expanduser("~"))
+DEFAULT_JOURNAL = HOME / ".local/share/opencode/audit/spec-gate.jsonl"
+
+GENESIS = "GENESIS"
+DETACHED = "DETACHED"
+BOOT_REASON_PREFIX = "audit:boot"
+KILL_ON_RE = re.compile(r"(?:^|\s)kill=on(?:\s|$)")
+
+USAGE = """Usage:
+    audit-verify [<journal-path>] [--json] [--quiet] [--help]
+
+Verify the prev_hash/entry_hash chain of a spec-gate audit journal (JSON Lines,
+read-only).  With no <journal-path> the live journal under $HOME is used; tests
+always pass an explicit fixture path.
+
+Options:
+    --json   print the machine-readable report (JSON object) instead of the
+             human-readable one
+    --quiet  print nothing when the chain is OK (exit code only); a failing
+             report is still printed
+    --help   show this help and exit 0
+
+Exit codes: 0 chain OK (forks and DETACHED are legal), 1 gap / hash mismatch /
+unparseable line after the marker, 2 no marker or usage error.
+"""
+
+
+def die(message: str, code: int = 2) -> None:
+    print(f"audit-verify: error: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def canon(entry: dict) -> str:
+    """Compact-sorted JSON text of the entry without ``entry_hash``."""
+    payload = {key: value for key, value in entry.items() if key != "entry_hash"}
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def entry_hash(prev: str, entry: dict) -> str:
+    r"""$H_n = \operatorname{sha256}(\operatorname{prev}_n \Vert
+    \operatorname{canon}(\operatorname{entry}_n))$ as hex."""
+    payload = prev.encode("utf-8") + canon(entry).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def parse_line(line: bytes) -> tuple[object | None, str | None]:
+    try:
+        return json.loads(line), None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return None, str(exc)
+
+
+def int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def short(value: str, width: int = 16) -> str:
+    return value if len(value) <= width else value[:width] + "\u2026"
+
+
+def verify(journal: Path) -> dict:
+    """Replay the chain and return the report.  Exits 2 when there is no marker."""
+    try:
+        raw = journal.read_bytes()
+    except OSError as exc:
+        die(f"cannot read journal {journal}: {exc}")
+
+    lines = raw.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()  # the trailing newline is a separator, not a line
+
+    # The first line carrying a string entry_hash is the chain marker; anything
+    # before it is the legacy preamble (never chain-checked, size + tail ts
+    # reported only).
+    marker_index: int | None = None
+    marker_hash: str | None = None
+    legacy_tail_ts: str | None = None
+    for index, line in enumerate(lines):
+        parsed, _error = parse_line(line)
+        if isinstance(parsed, dict) and isinstance(parsed.get("entry_hash"), str):
+            marker_index = index
+            marker_hash = parsed["entry_hash"]
+            break
+        if isinstance(parsed, dict) and isinstance(parsed.get("ts"), str):
+            legacy_tail_ts = parsed["ts"]
+    if marker_index is None:
+        die(f"no chain marker (entry_hash) found in {journal}")
+
+    gaps: list[dict] = []
+    entries: list[dict] = []
+    seen: set[str] = set()
+    first_line_of: dict[str, int] = {}
+    children: dict[str, list[dict]] = {}
+    boot_pids: list[int] = []
+    kill_on = False
+
+    for index in range(marker_index, len(lines)):
+        line_no = index + 1
+        obj, error = parse_line(lines[index])
+        if error is not None:
+            gaps.append(
+                {"line": line_no, "kind": "unparseable", "detail": f"not valid JSON: {error}"}
+            )
+            continue
+        if not isinstance(obj, dict):
+            gaps.append(
+                {"line": line_no, "kind": "unparseable", "detail": "line is not a JSON object"}
+            )
+            continue
+        prev = obj.get("prev_hash")
+        declared = obj.get("entry_hash")
+        if not isinstance(prev, str) or not prev:
+            gaps.append(
+                {"line": line_no, "kind": "missing-prev", "detail": "record has no string prev_hash"}
+            )
+            continue
+        if not isinstance(declared, str) or not declared:
+            gaps.append(
+                {
+                    "line": line_no,
+                    "kind": "missing-entry-hash",
+                    "detail": "record has no string entry_hash",
+                }
+            )
+            continue
+        computed = entry_hash(prev, obj)
+        if computed != declared:
+            gaps.append(
+                {
+                    "line": line_no,
+                    "kind": "hash-mismatch",
+                    "detail": (
+                        f"entry_hash replay mismatch: expected {computed}, got {declared}"
+                    ),
+                }
+            )
+            continue
+        if prev not in (GENESIS, DETACHED) and prev not in seen:
+            gaps.append(
+                {
+                    "line": line_no,
+                    "kind": "dangling-prev",
+                    "detail": (
+                        f"prev_hash {prev} matches no earlier chain entry "
+                        "(removed or reordered line?)"
+                    ),
+                }
+            )
+            continue
+
+        reason = obj.get("reason") if isinstance(obj.get("reason"), str) else ""
+        meta = {
+            "line": line_no,
+            "entry_hash": declared,
+            "prev": prev,
+            "seq": int_or_none(obj.get("seq")),
+            "pid": int_or_none(obj.get("pid")),
+            "boot": reason.startswith(BOOT_REASON_PREFIX),
+        }
+        entries.append(meta)
+        seen.add(declared)
+        first_line_of.setdefault(declared, line_no)
+        if meta["boot"]:
+            if meta["pid"] is not None:
+                boot_pids.append(meta["pid"])
+            if KILL_ON_RE.search(reason):
+                kill_on = True
+        if prev not in (GENESIS, DETACHED):
+            children.setdefault(prev, []).append(meta)
+
+    # A head with two or more children is a fork: legal, but listed.  Children
+    # are classified as `fork` unless they are boot records (boot wins).
+    forks: list[dict] = []
+    for head, kids in children.items():
+        if len(kids) < 2:
+            continue
+        for kid in kids:
+            kid["fork"] = True
+        forks.append(
+            {
+                "head": head,
+                "head_line": first_line_of.get(head),
+                "children": [
+                    {
+                        "line": kid["line"],
+                        "entry_hash": kid["entry_hash"],
+                        "seq": kid["seq"],
+                        "pid": kid["pid"],
+                    }
+                    for kid in sorted(kids, key=lambda kid: kid["line"])
+                ],
+            }
+        )
+    forks.sort(key=lambda fork: fork["head_line"] or 0)
+
+    boot_lines = sum(1 for meta in entries if meta["boot"])
+    detached_lines = sum(
+        1 for meta in entries if not meta["boot"] and meta["prev"] == DETACHED
+    )
+    fork_lines = sum(
+        1
+        for meta in entries
+        if meta.get("fork") and not meta["boot"] and meta["prev"] != DETACHED
+    )
+    linear_lines = len(entries) - boot_lines - detached_lines - fork_lines
+
+    return {
+        "journal": str(journal),
+        "ok": not gaps,
+        "lines_total": len(lines),
+        "legacy_lines": marker_index,
+        "legacy_tail_ts": legacy_tail_ts,
+        "chain_lines": len(lines) - marker_index,
+        "marker_line": marker_index + 1,
+        "marker_entry_hash": marker_hash,
+        "linear_lines": linear_lines,
+        "fork_lines": fork_lines,
+        "detached_lines": detached_lines,
+        "boot_lines": boot_lines,
+        "boot_pids": boot_pids,
+        "kill_on": kill_on,
+        "forks": forks,
+        "gaps": gaps,
+    }
+
+
+def print_human(report: dict) -> None:
+    print(f"journal      : {report['journal']}")
+    print(
+        f"lines        : {report['lines_total']} total "
+        f"(legacy {report['legacy_lines']}, chain {report['chain_lines']})"
+    )
+    if report["legacy_lines"]:
+        print(f"legacy tail  : {report['legacy_tail_ts'] or '-'}")
+    print(
+        f"marker       : line {report['marker_line']}, "
+        f"entry_hash {short(report['marker_entry_hash'])}"
+    )
+    if report["forks"]:
+        print(f"forks        : {len(report['forks'])}")
+        for fork in report["forks"]:
+            print(
+                f"  head {short(fork['head'])} (line {fork['head_line']}): "
+                f"{len(fork['children'])} children"
+            )
+            for child in fork["children"]:
+                tail = []
+                if child["seq"] is not None:
+                    tail.append(f"seq {child['seq']}")
+                if child["pid"] is not None:
+                    tail.append(f"pid {child['pid']}")
+                suffix = ("  " + "  ".join(tail)) if tail else ""
+                print(f"    line {child['line']}: {short(child['entry_hash'])}{suffix}")
+    else:
+        print("forks        : 0")
+    if report["gaps"]:
+        print(f"gaps         : {len(report['gaps'])}")
+        for gap in report["gaps"]:
+            print(f"  line {gap['line']} [{gap['kind']}] {gap['detail']}")
+    else:
+        print("gaps         : 0")
+    print(f"detached     : {report['detached_lines']}")
+    pids = ", ".join(str(pid) for pid in report["boot_pids"]) or "-"
+    kill = "on" if report["kill_on"] else "off"
+    print(f"boot         : {report['boot_lines']} (pids: {pids}) kill={kill}")
+    if report["ok"]:
+        print("verdict      : OK \u2014 chain recomputed; forks and DETACHED are legal")
+    else:
+        print("verdict      : FAIL \u2014 gaps or hash mismatches; the chain is not fully verified")
+
+
+def emit(report: dict, as_json: bool, quiet: bool) -> int:
+    if quiet and report["ok"]:
+        return 0
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_human(report)
+    return 0 if report["ok"] else 1
+
+
+def resolve_journal(arg: str | None) -> Path:
+    if arg is None:
+        return DEFAULT_JOURNAL
+    path = Path(arg).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
+
+
+def main(argv: list[str]) -> int:
+    args = argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
+
+    as_json = False
+    quiet = False
+    path_arg: str | None = None
+    for arg in args:
+        if arg == "--json":
+            as_json = True
+        elif arg == "--quiet":
+            quiet = True
+        elif arg.startswith("-") and arg != "-":
+            die(f"unknown option: {arg}")
+        elif path_arg is None:
+            path_arg = arg
+        else:
+            die(f"unexpected argument: {arg}")
+
+    journal = resolve_journal(path_arg)
+    if not journal.is_file():
+        die(f"journal not found: {journal}")
+    return emit(verify(journal), as_json, quiet)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

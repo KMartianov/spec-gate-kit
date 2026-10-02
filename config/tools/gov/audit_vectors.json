@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "canon_cases": [
+    {
+      "id": "ascii-compact-sorted",
+      "entry": {
+        "ts": "2026-10-01T00:00:00Z",
+        "tool": "write",
+        "targets": [
+          "src/a.ts"
+        ],
+        "decision": "allowed",
+        "spec": null
+      },
+      "canon": "{\"decision\":\"allowed\",\"spec\":null,\"targets\":[\"src/a.ts\"],\"tool\":\"write\",\"ts\":\"2026-10-01T00:00:00Z\"}"
+    },
+    {
+      "id": "targets-order-and-separators",
+      "entry": {
+        "tool": "edit",
+        "targets": [
+          "config/z.ts",
+          "config/a.ts",
+          "config/m.ts"
+        ],
+        "reason": "allowed-via:alpha"
+      },
+      "canon": "{\"reason\":\"allowed-via:alpha\",\"targets\":[\"config/z.ts\",\"config/a.ts\",\"config/m.ts\"],\"tool\":\"edit\"}"
+    },
+    {
+      "id": "cyrillic-utf8-raw",
+      "entry": {
+        "reason": "мандат: «Кириллица» — allowed",
+        "tool": "edit",
+        "targets": [
+          "проект/файл.py"
+        ]
+      },
+      "canon": "{\"reason\":\"мандат: «Кириллица» — allowed\",\"targets\":[\"проект/файл.py\"],\"tool\":\"edit\"}"
+    },
+    {
+      "id": "entry-hash-excluded-prev-included",
+      "entry": {
+        "ts": "2026-10-01T12:00:00.000Z",
+        "decision": "allowed",
+        "prev_hash": "GENESIS",
+        "entry_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "seq": 0
+      },
+      "canon": "{\"decision\":\"allowed\",\"prev_hash\":\"GENESIS\",\"seq\":0,\"ts\":\"2026-10-01T12:00:00.000Z\"}"
+    },
+    {
+      "id": "ts-literal-no-normalization",
+      "entry": {
+        "ts": "2026-10-01T12:00:00.000+00:00",
+        "tool": "bash"
+      },
+      "canon": "{\"tool\":\"bash\",\"ts\":\"2026-10-01T12:00:00.000+00:00\"}"
+    }
+  ],
+  "chain_cases": [
+    {
+      "id": "genesis-first",
+      "prev": "GENESIS",
+      "entry": {
+        "ts": "2026-10-01T12:00:00.000Z",
+        "sessionID": "ses_chain",
+        "tool": "spec-gate",
+        "targets": [],
+        "root": "/home/u/proj",
+        "decision": "allowed",
+        "reason": "audit:chain-start legacy_lines=2 legacy_tail_ts=2026-09-30T23:59:59Z legacy_tail_sha256=32f3444c569daee289554862c59ad8443c696f8bff546aa7536f845a5d781c46",
+        "spec": null,
+        "prev_hash": "GENESIS",
+        "pid": 4242,
+        "seq": 0,
+        "plugin": "0123456789abcdef"
+      },
+      "entry_hash": "de63827e3a4dbe2b2e49378e79e328012039bb4673b90d0beb5e1dbd2c69199b"
+    },
+    {
+      "id": "second-extends-first",
+      "prev": "de63827e3a4dbe2b2e49378e79e328012039bb4673b90d0beb5e1dbd2c69199b",
+      "entry": {
+        "ts": "2026-10-01T12:00:01.000Z",
+        "sessionID": "ses_chain",
+        "tool": "edit",
+        "targets": [
+          "src/app.py"
+        ],
+        "root": "/home/u/proj",
+        "decision": "blocked",
+        "reason": "deny:docs/**",
+        "spec": "alpha",
+        "prev_hash": "de63827e3a4dbe2b2e49378e79e328012039bb4673b90d0beb5e1dbd2c69199b",
+        "pid": 4242,
+        "seq": 1,
+        "plugin": "0123456789abcdef"
+      },
+      "entry_hash": "cf624f03d663dd6dbcd697c5ebf0a0e82459a37f5c45aa3c180e70ce1d7bb8c5"
+    },
+    {
+      "id": "detached-boot",
+      "prev": "DETACHED",
+      "entry": {
+        "ts": "2026-10-01T12:00:02.000Z",
+        "sessionID": "ses_chain",
+        "tool": "spec-gate",
+        "targets": [],
+        "root": "/home/u/proj",
+        "decision": "allowed",
+        "reason": "audit:boot kill=off plugin=0123456789abcdef pid=4242",
+        "spec": null,
+        "prev_hash": "DETACHED",
+        "pid": 4242,
+        "seq": 0,
+        "plugin": "0123456789abcdef"
+      },
+      "entry_hash": "5b3b4e03d280171f82cb6da0ebcda7c0241c9603c7b765d0507b85eb2d6f0b8f"
+    }
+  ]
+}
