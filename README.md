@@ -1,6 +1,6 @@
 # spec-gate-kit — переносимый комплект управления спецификациями для OpenCode
 
-**Версия `0.1.0` · состояние контрактов — `config/bin/spec-status` · ревизии — `git log`**
+**Версия `0.2.0` · состояние контрактов — `config/bin/spec-status` · ревизии — `git log`**
 
 **Что это.** Самодостаточный набор механики «запрета кода без одобренной
 спецификации» для агентных сессий OpenCode: плагин Zero-Code Gate, CLI жизненного
@@ -30,7 +30,7 @@
 | `.slim/spec/` | контракты самого кита, `notes/`, `archive/` | активные: `audit-chain-p0`, `p0-portability-sprint`, `portable-evidence-paths-p0`; архив: `preflight-0`, `evidence-atomic-p0`, `gate-parity-p0` (состояния — `config/bin/spec-status`) |
 | `verify/` | DoD-evidence прогонов (`<id>.json`, schema v2) | 22 отслеживаемых файла — **доказательство, не мусор** |
 | `examples/` | сквозные примеры контрактов | `minimal/` (см. `examples/README.md`) |
-| `VERSION` | semver кита | `0.1.0` |
+| `VERSION` | semver кита | `0.2.0` |
 | `CHANGELOG.md` | история изменений | Keep a Changelog |
 | `install.sh` | идемпотентная установка `--target DIR` | см. §3 |
 | `.github/workflows/ci.yml` | CI: pytest + `node --test` + чекеры | см. §3 |

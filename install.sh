@@ -115,7 +115,7 @@ mkdir -p "$TARGET"
 
 while IFS= read -r f; do
   install_file "$f" "$TARGET/${f#"$ROOT"/}"
-done < <(find "$ROOT/config" -type f)
+done < <(find "$ROOT/config" -type f -not -path '*/__pycache__/*' -not -name '*.pyc')
 
 install_file "$ROOT/README.md" "$TARGET/README.md"
 install_file "$ROOT/VERSION"   "$TARGET/VERSION"

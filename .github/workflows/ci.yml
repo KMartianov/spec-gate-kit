@@ -30,16 +30,17 @@ jobs:
       - name: Gate plugin tests (node --test)
         run: node --test config/plugins/__tests__/spec-gate.test.ts
 
-      - name: Contract lint (this sprint)
-        run: python3 config/bin/docs-lint --spec p0-portability-sprint
+      - name: Contract lint (all active specs)
+        run: |
+          python3 config/bin/docs-lint --spec audit-chain-p0
+          python3 config/bin/docs-lint --spec p0-portability-sprint
+          python3 config/bin/docs-lint --spec portable-evidence-paths-p0
 
       - name: Portability — shipped config snapshot
         run: python3 config/tools/gov/check_portability.py config
 
-      # Non-blocking ON PURPOSE: `paths` still reports exactly one occurrence —
-      # config/command/spec-approve.md:9 — which sits in the kit's deny zone and
-      # may be edited by a human only (GOV-2). Do not hide it with `|| true`;
-      # the failure stays visible in the log.
-      - name: Portability — paths (expected non-zero until human edit)
-        continue-on-error: true
+      - name: Portability — paths (no author-home literal; blocking)
         run: python3 config/tools/gov/check_portability.py paths
+
+      - name: Installer smoke (install into a temp target)
+        run: bash install.sh --target "$RUNNER_TEMP/kit-target"

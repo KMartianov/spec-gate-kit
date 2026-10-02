@@ -5,7 +5,7 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/);
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [0.2.0] — 2026-10-03
 
 ### Added
 - Tamper-evident audit chain (`prev_hash` / `entry_hash` / `pid` / `seq` / `plugin`)
