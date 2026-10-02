@@ -20,6 +20,12 @@
  * record in the real `~/.local/share/opencode/approvals/**`; the explicit guard
  * test at the end snapshots the real store before/after and fails on any drift.
  *
+ * Hermeticity (B1): `OPENCODE_SPEC_GATE_AUDIT_FILE` is *pinned* to a fixture
+ * path before the import instead of being inherited from the outer environment.
+ * Without the pin a hostile/leaked value would silently relocate the whole
+ * suite's journal (and break test 25); child processes delete the variable so
+ * their default HOME-derived journal is exercised instead.
+ *
  * Fixtures live under `$TMPDIR` via `mkdtempSync` and NEVER under
  * `/tmp/opencode/**` (that prefix is exempt in the gate, so block tests there
  * would be meaningless).
@@ -89,6 +95,12 @@ mkdirSync(PROJECTS, { recursive: true })
 process.env.HOME = FAKE_HOME
 process.env.XDG_DATA_HOME = path.join(FAKE_HOME, ".local", "share")
 
+// B1: pin the journal override deterministically. Never inherit an external
+// `OPENCODE_SPEC_GATE_AUDIT_FILE`; the fixture path lives under FAKE_HOME so
+// test 25's "not the real journal" guard keeps its meaning.
+const FAKE_AUDIT_FILE = path.join(FAKE_HOME, ".local", "share", "opencode", "audit", "spec-gate.jsonl")
+process.env.OPENCODE_SPEC_GATE_AUDIT_FILE = FAKE_AUDIT_FILE
+
 const mod = await import(pathToFileURL(PLUGIN).href)
 const specGate = mod.default as { setup: (ctx: unknown) => Promise<unknown> }
 const SpecGate = mod.SpecGate as (ctx: unknown) => Promise<Record<string, unknown>>
@@ -96,6 +108,13 @@ const __test = mod.__test as Record<string, any>
 
 const AUDIT_FILE = __test.AUDIT_FILE as string
 const APPROVER = __test.APPROVER as string
+
+// The pin must actually take effect (guards against a typo / path drift).
+assert.equal(
+  path.resolve(AUDIT_FILE),
+  path.resolve(FAKE_AUDIT_FILE),
+  "harness must pin AUDIT_FILE to the fixture path, not inherit the outer environment",
+)
 
 // --- fresh-process child (boot canary / legacy marker) ----------------------
 //
@@ -134,10 +153,48 @@ function childEnv(home: string, extra: Record<string, string> = {}): NodeJS.Proc
   return { ...env, ...extra }
 }
 
-function runChild(env: NodeJS.ProcessEnv): void {
-  const res = spawnSync(process.execPath, [CHILD_SCRIPT], { env, encoding: "utf8" })
+function runChild(env: NodeJS.ProcessEnv, script: string = CHILD_SCRIPT): void {
+  const res = spawnSync(process.execPath, [script], { env, encoding: "utf8" })
   assert.equal(res.status, 0, `child failed (status ${res.status}):\n${res.stdout}\n${res.stderr}`)
 }
+
+// --- fault-injection child (B2/B3: retry after a failed audit write) --------
+//
+// `CHILD_BLOCKER` starts life as a *regular file* sitting on the journal's
+// parent path, so `mkdirSync(dirname(AUDIT_FILE), { recursive: true })` fails
+// (ENOTDIR). The child fires one gated (blocked) call, then replaces the file
+// with a real directory and fires again: the second write succeeds. A correct
+// implementation must (a) retry the boot canary it could not write and (b) not
+// consume a `seq` for the failed record.
+
+const FAULT_SCRIPT = path.join(BASE, "audit-fault-child.mjs")
+writeFileSync(
+  FAULT_SCRIPT,
+  [
+    'import { mkdirSync, rmSync } from "node:fs"',
+    'import { pathToFileURL } from "node:url"',
+    "const mod = await import(pathToFileURL(process.env.CHILD_PLUGIN).href)",
+    "const hooks = await mod.SpecGate({ directory: process.env.CHILD_DIR })",
+    'const before = hooks["tool.execute.before"]',
+    "const fire = async () => {",
+    "  try {",
+    '    await before(',
+    '      { tool: "edit", sessionID: "ses_fault", callID: "call_fault" },',
+    "      { args: { filePath: process.env.CHILD_TARGET } },",
+    "    )",
+    "  } catch {",
+    "    /* the gate blocks the gated write; the audit attempt is what matters */",
+    "  }",
+    "}",
+    "await fire()",
+    'rmSync(process.env.CHILD_BLOCKER, { recursive: true, force: true })',
+    'mkdirSync(process.env.CHILD_BLOCKER, { recursive: true })',
+    "await fire()",
+    'process.stdout.write("FAULT_OK\\n")',
+    "",
+  ].join("\n"),
+  "utf8",
+)
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -590,4 +647,68 @@ test("25. audit-journal isolation guard: the real journal was not touched", () =
     REAL_AUDIT_BEFORE,
     "the real audit directory changed during this run",
   )
+})
+
+// --- env override (B1) ------------------------------------------------------
+
+test("26. OPENCODE_SPEC_GATE_AUDIT_FILE override redirects the journal (fresh process)", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "spec-gate-auditfile-"))
+  const proj = path.join(home, "proj")
+  mkdirSync(path.join(proj, "src"), { recursive: true })
+  const override = path.join(home, "custom-audit", "pinned.jsonl")
+  const defaultJournal = path.join(home, ".local", "share", "opencode", "audit", "spec-gate.jsonl")
+  try {
+    runChild(
+      childEnv(home, {
+        CHILD_DIR: proj,
+        CHILD_TARGET: path.join(proj, "src", "a.ts"),
+        OPENCODE_SPEC_GATE_AUDIT_FILE: override,
+      }),
+    )
+    assert.ok(existsSync(override), "the override journal must be created")
+    const records = readFileSync(override, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    const boots = records.filter((r) => typeof r.reason === "string" && r.reason.startsWith("audit:boot"))
+    assert.equal(boots.length, 1, "the boot canary must land in the override journal")
+    assert.equal(boots[0].seq, 0)
+    assert.equal(
+      existsSync(defaultJournal),
+      false,
+      "the default HOME journal must not be created when the override is set",
+    )
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+// --- failed-write resilience (B2 + B3) --------------------------------------
+
+test("27. a failed audit write is retryable: boot is not consumed and seq has no gap (fresh process)", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "spec-gate-fault-"))
+  const proj = path.join(home, "proj")
+  mkdirSync(path.join(proj, "src"), { recursive: true })
+  mkdirSync(path.join(proj, ".slim", "spec"), { recursive: true })
+  writeFileSync(path.join(proj, ".slim", "spec", "task.md"), fixtureSpec(), "utf8")
+  const blocker = path.join(home, "blocker")
+  writeFileSync(blocker, "not a directory\n", "utf8")
+  const journal = path.join(blocker, "audit", "spec-gate.jsonl")
+  try {
+    runChild(
+      childEnv(home, {
+        CHILD_DIR: proj,
+        CHILD_TARGET: path.join(proj, "src", "a.ts"),
+        CHILD_BLOCKER: blocker,
+        OPENCODE_SPEC_GATE_AUDIT_FILE: journal,
+      }),
+      FAULT_SCRIPT,
+    )
+    const records = readFileSync(journal, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    const boots = records.filter((r) => typeof r.reason === "string" && r.reason.startsWith("audit:boot"))
+    assert.equal(boots.length, 1, "the boot canary must be retried after a failed write and land exactly once")
+    assert.equal(boots[0].seq, 0)
+    const blocked = records.filter((r) => r.decision === "blocked")
+    assert.equal(blocked.length, 1, "the second (successful) call must record exactly one blocked verdict")
+    assert.equal(blocked[0].seq, 1, "the failed write must not consume a seq (chain must stay gap-free)")
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })

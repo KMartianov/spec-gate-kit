@@ -1038,7 +1038,6 @@ function appendChained(entry: AuditEntry, seq: number): void {
  */
 function ensureBoot(sessionID: string): void {
   if (bootWritten) return
-  bootWritten = true
   try {
     const kill = process.env.OPENCODE_SPEC_GATE === "off" ? "on" : "off"
     appendChained(
@@ -1054,6 +1053,11 @@ function ensureBoot(sessionID: string): void {
       },
       0,
     )
+    // Mark the canary as written ONLY after a successful append (B2/F7.2): a
+    // failed write (e.g. an unwritable audit dir) must stay retryable in this
+    // process instead of silently suppressing boot forever. Fail-open and the
+    // exactly-once happy path are unchanged.
+    bootWritten = true
   } catch (err) {
     // Fail-open: a boot write error must never change the gate verdict.
     process.stderr.write(`[spec-gate] audit boot write failed: ${String(err)}\n`)
@@ -1068,8 +1072,12 @@ function ensureBoot(sessionID: string): void {
 function audit(entry: AuditEntry): void {
   try {
     ensureBoot(entry.sessionID)
-    chainSeq += 1
-    appendChained(entry, chainSeq)
+    // Reserve the next seq only once the record is durably appended (B3/F7.3):
+    // a failed write must not "consume" a number and leave a permanent gap in
+    // the chain. Compute it, write it, and commit the counter on success.
+    const nextSeq = chainSeq + 1
+    appendChained(entry, nextSeq)
+    chainSeq = nextSeq
   } catch (err) {
     process.stderr.write(`[spec-gate] audit write failed: ${String(err)}\n`)
   }
