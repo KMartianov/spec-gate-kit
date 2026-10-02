@@ -2,13 +2,13 @@
   "check": "p0-portability-sprint-docs-lint",
   "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 python3 config/bin/docs-lint --spec p0-portability-sprint",
   "exit_code": 0,
-  "started_at": "2026-10-02T21:00:54.037223+00:00",
-  "finished_at": "2026-10-02T21:00:54.112502+00:00",
-  "duration_s": 0.075,
+  "started_at": "2026-10-02T21:11:07.632550+00:00",
+  "finished_at": "2026-10-02T21:11:07.705501+00:00",
+  "duration_s": 0.073,
   "spec": ".slim/spec/p0-portability-sprint.md",
   "spec_sha256": "879fbcff536cd367fda75f71810e235f02de879921dc5cafbd258c71a3d5b581",
   "tail": "",
-  "git_head": "d99a711736e1e56f55cf49b0c54496865456abc9",
+  "git_head": "4c7031b3d44fe140f7be7ad7716c6d7602b4122e",
   "tree_dirty": false,
-  "scope_sha256": "560662ff5d8ab0f7305732c1f3f7ad9408fb8a80feadc1181409fef1c2063a19"
+  "scope_sha256": "1767ccebd9624ff3beb01ee0a9824f271e69ea464c541c14bd36885a3bc98855"
 }

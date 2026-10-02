@@ -2,13 +2,13 @@
   "check": "portable-evidence-paths-p0-docs-lint",
   "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 python3 config/bin/docs-lint --spec portable-evidence-paths-p0",
   "exit_code": 0,
-  "started_at": "2026-10-02T21:01:15.013775+00:00",
-  "finished_at": "2026-10-02T21:01:15.133959+00:00",
-  "duration_s": 0.12,
+  "started_at": "2026-10-02T21:11:30.595879+00:00",
+  "finished_at": "2026-10-02T21:11:30.682841+00:00",
+  "duration_s": 0.087,
   "spec": ".slim/spec/portable-evidence-paths-p0.md",
   "spec_sha256": "040f4120d5a0111c611fb75363bef0173b3f934bc8fb9419e7cb3c8112a939c0",
   "tail": "",
-  "git_head": "d99a711736e1e56f55cf49b0c54496865456abc9",
+  "git_head": "4c7031b3d44fe140f7be7ad7716c6d7602b4122e",
   "tree_dirty": false,
   "scope_sha256": "217c908a145be3d977c27c46e4aa3964367dd83d25e36fe201cb4badb35e62f7"
 }

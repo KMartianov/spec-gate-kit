@@ -2,13 +2,13 @@
   "check": "p0-portability-sprint-install",
   "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 python3 config/tools/gov/check_portability.py install",
   "exit_code": 0,
-  "started_at": "2026-10-02T21:00:54.288321+00:00",
-  "finished_at": "2026-10-02T21:00:54.792509+00:00",
-  "duration_s": 0.504,
+  "started_at": "2026-10-02T21:11:07.875642+00:00",
+  "finished_at": "2026-10-02T21:11:08.361847+00:00",
+  "duration_s": 0.486,
   "spec": ".slim/spec/p0-portability-sprint.md",
   "spec_sha256": "879fbcff536cd367fda75f71810e235f02de879921dc5cafbd258c71a3d5b581",
   "tail": "check_portability: install: clean (temp target removed)\n",
-  "git_head": "d99a711736e1e56f55cf49b0c54496865456abc9",
+  "git_head": "4c7031b3d44fe140f7be7ad7716c6d7602b4122e",
   "tree_dirty": false,
-  "scope_sha256": "560662ff5d8ab0f7305732c1f3f7ad9408fb8a80feadc1181409fef1c2063a19"
+  "scope_sha256": "1767ccebd9624ff3beb01ee0a9824f271e69ea464c541c14bd36885a3bc98855"
 }
