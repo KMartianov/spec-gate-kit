@@ -5,6 +5,22 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/);
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Added
+- Tamper-evident audit chain (`prev_hash` / `entry_hash` / `pid` / `seq` / `plugin`)
+  в `config/plugins/spec-gate.ts`, boot-canary (в т.ч. под `OPENCODE_SPEC_GATE=off`),
+  read-only `config/bin/audit-verify`, кросс-языковые векторы
+  `config/tools/gov/audit_vectors.json` (`audit-chain-p0`).
+
+### Changed
+- `verify/*.json`: поле `spec` теперь root-relative + dual-accept чтение;
+  `check_portability.py paths` сканирует `spec`-поле `verify/**/*.json`
+  (active → hard-fail, archived → note) (`portable-evidence-paths-p0`).
+
+### Docs
+- Граница тампер-эвиденс и релизная политика; доктрина m8 «одобрения host-local».
+
 ## [0.1.0] — 2026-10-02
 
 Первый «portable» срез кита в рамках контракта `p0-portability-sprint`

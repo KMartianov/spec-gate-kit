@@ -1,6 +1,6 @@
 # spec-gate-kit — переносимый комплект управления спецификациями для OpenCode
 
-**SYNCED: `f984997` (база) + незакоммиченный P0-спринт (working tree)** · версия `0.1.0`
+**Версия `0.1.0` · состояние контрактов — `config/bin/spec-status` · ревизии — `git log`**
 
 **Что это.** Самодостаточный набор механики «запрета кода без одобренной
 спецификации» для агентных сессий OpenCode: плагин Zero-Code Gate, CLI жизненного
@@ -27,8 +27,8 @@
 | `config/` | drop-in-зеркало каталога конфигурации OpenCode | CLI, плагин, тесты, снапшоты, шаблоны, доктрина (см. ниже) |
 | `docs/` | доктрина и заметки | ADR `0000…0004`, Diátaxis-квадранты (`tutorials/`, `how-to/`, `reference/`, `explanation/`), `guides/`, `notes/`, `SPEC-OpenCode-Hardening.md` — **human-owned (GOV-2)** |
 | `research/` | исследовательские материалы + симуляция `research/sim/` | `M1…M4`, `S1…S6`, `SYNTHESIS.md`, `sim/` (скрипты + результаты) |
-| `.slim/spec/` | контракты самого кита, `notes/`, `archive/` | активные: `p0-portability-sprint` (approved), `audit-chain-p0` (draft); архив: `preflight-0`, `evidence-atomic-p0` (DONE), `gate-parity-p0` (DONE) |
-| `verify/` | DoD-evidence прогонов (`<id>.json`, schema v2) | 10 отслеживаемых файлов — **доказательство, не мусор** |
+| `.slim/spec/` | контракты самого кита, `notes/`, `archive/` | активные: `audit-chain-p0`, `p0-portability-sprint`, `portable-evidence-paths-p0`; архив: `preflight-0`, `evidence-atomic-p0`, `gate-parity-p0` (состояния — `config/bin/spec-status`) |
+| `verify/` | DoD-evidence прогонов (`<id>.json`, schema v2) | 22 отслеживаемых файла — **доказательство, не мусор** |
 | `examples/` | сквозные примеры контрактов | `minimal/` (см. `examples/README.md`) |
 | `VERSION` | semver кита | `0.1.0` |
 | `CHANGELOG.md` | история изменений | Keep a Changelog |
@@ -41,26 +41,27 @@
 
 | Путь | LOC | Что это |
 |---|---|---|
-| `config/plugins/spec-gate.ts` | 997 | Сам гейт: `tool.execute.before`, allow/block, аудит-JSONL |
-| `config/plugins/__tests__/spec-gate.test.ts` | 396 | Тесты гейта (`node --test`), включая fail-closed разбор путей |
+| `config/plugins/spec-gate.ts` | 1283 | Сам гейт: `tool.execute.before`, allow/block, аудит-JSONL |
+| `config/plugins/__tests__/spec-gate.test.ts` | 593 | Тесты гейта (`node --test`), включая fail-closed разбор путей |
 | `config/bin/spec-approve` | 616 | Одобрение контракта человеком: флип статуса → штамп → `sha256` пост-флип байтов |
 | `config/bin/spec-revoke` | 388 | Отзыв одобрения (ревертит статус; удаляет записи только отозванных спек) |
 | `config/bin/spec-status` | 460 | Производное состояние `INTAKE → … → DONE`, read-only, multi-spec, `--json` |
 | `config/bin/spec-new` | 261 | Скаффолд проекта: спека, Diátaxis-дерево, `docs/adr/`, README, `.gitignore`, `git init` |
-| `config/bin/dod-run` | 551 | Исполнение `dod`-чеков → `verify/<id>.json` (evidence v2: `spec_sha256`, `git_head`, `tree_dirty`, `tail`) |
+| `config/bin/dod-run` | 568 | Исполнение `dod`-чеков → `verify/<id>.json` (evidence v2: `spec_sha256`, `git_head`, `tree_dirty`, `tail`) |
 | `config/bin/docs-lint` | 474 | Линт контрактов: статус, `scope`, ADR-ссылки, коллизии `dod.id` |
 | `config/bin/spec-preflight` | 473 | Read-only pre-approval линт (консенсус по `scope`/командам), ничего не пишет |
 | `config/bin/wave-run` | 522 | Волна по контрактам; `--dry-run` по умолчанию, `--execute` → делегирует `dod-run` |
 | `config/bin/gate-off`, `config/bin/gate-on` | 93 / 87 | Локальный escape hatch (`<root>/.slim/GATE-OFF`) — только человеку |
-| `config/bin/spec_scope.py` | 865 | Общий разбор `scope`-фенса и glob-матчинг (импортируется CLI) |
-| `config/tools/gov/check_portability.py` | 573 | Исполняемый чекер портируемости: `paths` / `config` / `install` (stdlib) |
+| `config/bin/spec_scope.py` | 911 | Общий разбор `scope`-фенса и glob-матчинг (импортируется CLI) |
+| `config/tools/gov/check_portability.py` | 692 | Исполняемый чекер портируемости: `paths` / `config` / `install` (stdlib) |
 | `config/tools/gov/scope_vectors.json` | 32 | Вектор-кейсы glob-семантики `scope` |
 
-**Тесты CLI** — `config/bin/tests/*.py` (11 файлов, 3289 строк):
-`test_docs_lint.py`, `test_dod_run.py`, `test_gate_marker.py`,
-`test_scope_parity.py`, `test_spec_approve.py`, `test_spec_new.py`,
-`test_spec_preflight.py`, `test_spec_revoke.py`, `test_spec_status.py`,
-`test_wave_run.py`, `test_wave_run_real_dod.py`.
+**Тесты CLI** — `config/bin/tests/*.py` (13 файлов, 4311 строк):
+`test_audit_verify.py`, `test_docs_lint.py`, `test_dod_run.py`,
+`test_gate_marker.py`, `test_portable_paths.py`, `test_scope_parity.py`,
+`test_spec_approve.py`, `test_spec_new.py`, `test_spec_preflight.py`,
+`test_spec_revoke.py`, `test_spec_status.py`, `test_wave_run.py`,
+`test_wave_run_real_dod.py`.
 
 Остальное в `config/`:
 `templates/{spec-template,adr-template}.md`, `command/spec-approve.md` (слэш-команда
@@ -162,25 +163,24 @@ CI (`.github/workflows/ci.yml`) на push/PR гоняет то же на Python 
 | `docs/**` | **human-owned (GOV-2)**: агент не трогает; редактирует человек в редакторе |
 
 Проверка (read-only): `python3 config/tools/gov/check_portability.py paths`.
-На чистом снимке единственное нарушение — первая строка таблицы
-(`config/command/spec-approve.md:9`), поэтому чекер даёт `rc=1`; после подстановки
-пути человеком он даёт `rc=0` (остальные строки — `note:`-ориентиры, живой путь не
-хардкодят).
+Чекер даёт `rc=0` — `0` нарушений и `45` информационных `note:`: `35` вхождений
+`~/.config/opencode` (доктрина/код) и `10` `[evidence-inactive]` (доказательства
+архивных контрактов); как нарушения они не засчитываются.
 
 ---
 
 ## 5. Состояние и честность
 
 **Проверено.**
-- `python3 -m pytest config/bin/tests -q` — **149 passed** (последний прогон
+- `python3 -m pytest config/bin/tests -q` — **186 passed** (последний прогон
   изоляции тестов; пути CLI резолвятся от `__file__`, не от живой машины).
-- `node --test config/plugins/__tests__/spec-gate.test.ts` — **20/20**.
+- `node --test config/plugins/__tests__/spec-gate.test.ts` — **25/25**.
 - `python3 config/tools/gov/check_portability.py config` — снапшот харденизирован:
   в `permission.external_directory` нет каталогов живой конфигурации OpenCode;
   `bash` всех агентов — объектные карты без human-only CLI.
-- `python3 config/tools/gov/check_portability.py paths` — **rc=1 до подстановки**:
-  ровно одно вхождение — `config/command/spec-approve.md:9` (human-owned, зона
-  `deny`); после правки человеком — `rc=0`.
+- `python3 config/tools/gov/check_portability.py paths` — **rc=0**: `0` нарушений,
+  `45` информационных `note:` (`35` вхождений `~/.config/opencode` + `10`
+  `[evidence-inactive]`).
 - `python3 config/bin/docs-lint --spec p0-portability-sprint` — без ERROR.
 
 **Почему `verify/**` трекается.** `.gitignore` существует и намеренно **не**
@@ -192,8 +192,9 @@ Feedback-правило источника: editing spec invalidates approval **
 - **F8 — политика `verify/**`.** Выбор tracked / untracked + `.gitignore` / внешнее
   артефакт-хранилище — отдельное продуктовое решение человека; контракт его не
   предрешает. Аудит 2026-10-02 рекомендует **tracked** (совпадает с `.gitignore`,
-  ADR-0004 и этим README); расхождение в `research/SYNTHESIS.md §3a` подлежит
-  синхронизации человеком.
+  ADR-0004 и этим README); `research/SYNTHESIS.md §3a` по трекингу **совпадает**
+  (tracked). Фактическое расхождение — только **namespacing**
+  `verify/<slug>/<id>.json` (P1, не реализован, отложено).
 - **P1.** HMAC-подпись одобрений, namespaced `verify/<slug>/<id>.json`,
   wave-дедуп, `oc-usage` — вне этого среза.
 - **Аудит-журнал** не tamper-evident (нет `prev_hash`-цепочки). См. полный аудит
@@ -221,6 +222,14 @@ Feedback-правило источника: editing spec invalidates approval **
 - **Политика (d)-lite.** `verify/**` трекается как доказательство прогонов DoD
   (schema v2): «релиз — это релиз только после `git push`». Удалённый репозиторий —
   граница доверия; локальный `.git` перезаписываем тем же пользователем.
+- **Одобрения host-local.** Записи одобрений
+  (`~/.local/share/opencode/approvals/<rootHash>/<slug>.json`) привязаны к
+  абсолютному пути корня проекта (`root_hash = sha256(str(root))[:16]`) и к
+  абсолютному пути спеки в имени файла. Клон или перемещение репозитория ⇒
+  одобрения не видны ⇒ контракт в `SPEC_DESIGN`. Восстановление — только
+  человеком: `~/.config/opencode/bin/spec-approve --all`. Портируемый артефакт —
+  `verify/**`: поле `spec` хранится root-relative (POSIX), чтение dual-accept
+  (legacy-абсолютный + относительный), первичная идентичность — `spec_sha256`.
 - `DONE` зарабатывается артефактами (`verify/<id>.json`), а не заявлением;
   состояние никогда не хранится файлом — только выводится.
 - Снапшот `config/` — не «настройка по умолчанию»: это рабочая конфигурация

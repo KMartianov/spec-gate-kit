@@ -403,3 +403,11 @@ The deprecated, inert `.opencode/` pack was deleted; global skills live in
 - **Policy (d)-lite.** `verify/**` is tracked proof (schema v2), and "a release is not
   a release until `git push`": the remote is the trust boundary, because a local
   `.git` is rewritable by the same user.
+- **Approvals are host-local.** Approval records
+  (`~/.local/share/opencode/approvals/<rootHash>/<slug>.json`) are bound to the
+  absolute project-root path (`root_hash = sha256(str(root))[:16]`) and to the
+  absolute spec path in the record filename. Cloning or moving the repo makes
+  approvals invisible (`SPEC_DESIGN`); recovery is human-only via
+  `spec-approve --all`. The portable artifact is `verify/**`: the `spec` field is
+  root-relative (POSIX), read with dual-accept (legacy absolute + relative), with
+  `spec_sha256` as the primary identity.
