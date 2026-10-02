@@ -2,13 +2,13 @@
   "check": "audit-chain-p0-docs-lint",
   "cmd": "nice -n 19 taskset -c 0,1 ionice -c3 python3 config/bin/docs-lint --spec audit-chain-p0",
   "exit_code": 0,
-  "started_at": "2026-10-02T19:55:04.404838+00:00",
-  "finished_at": "2026-10-02T19:55:04.519109+00:00",
-  "duration_s": 0.114,
+  "started_at": "2026-10-02T19:56:38.541268+00:00",
+  "finished_at": "2026-10-02T19:56:38.644538+00:00",
+  "duration_s": 0.103,
   "spec": ".slim/spec/audit-chain-p0.md",
   "spec_sha256": "869a306d73a85005bc8b06133e5ed5962592914df4e53da188fac2877fdd6a6a",
   "tail": "",
-  "git_head": "d414861505e01a573333a79ef6b9c43bfcf452a9",
+  "git_head": "4ccacb6ab17ef9e713b60c28fb20f59ac0cb9549",
   "tree_dirty": false,
   "scope_sha256": "5f8b1fb83ef9407bc51de18e0c441deca93e25ba95be938d747c8f1618330eb6"
 }
