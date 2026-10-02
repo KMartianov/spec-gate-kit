@@ -41,8 +41,8 @@
 
 | Путь | LOC | Что это |
 |---|---|---|
-| `config/plugins/spec-gate.ts` | 1283 | Сам гейт: `tool.execute.before`, allow/block, аудит-JSONL |
-| `config/plugins/__tests__/spec-gate.test.ts` | 593 | Тесты гейта (`node --test`), включая fail-closed разбор путей |
+| `config/plugins/spec-gate.ts` | 1291 | Сам гейт: `tool.execute.before`, allow/block, аудит-JSONL |
+| `config/plugins/__tests__/spec-gate.test.ts` | 714 | Тесты гейта (`node --test`), включая fail-closed разбор путей |
 | `config/bin/spec-approve` | 616 | Одобрение контракта человеком: флип статуса → штамп → `sha256` пост-флип байтов |
 | `config/bin/spec-revoke` | 388 | Отзыв одобрения (ревертит статус; удаляет записи только отозванных спек) |
 | `config/bin/spec-status` | 460 | Производное состояние `INTAKE → … → DONE`, read-only, multi-spec, `--json` |
@@ -163,9 +163,10 @@ CI (`.github/workflows/ci.yml`) на push/PR гоняет то же на Python 
 | `docs/**` | **human-owned (GOV-2)**: агент не трогает; редактирует человек в редакторе |
 
 Проверка (read-only): `python3 config/tools/gov/check_portability.py paths`.
-Чекер даёт `rc=0` — `0` нарушений и `45` информационных `note:`: `35` вхождений
-`~/.config/opencode` (доктрина/код) и `10` `[evidence-inactive]` (доказательства
-архивных контрактов); как нарушения они не засчитываются.
+Чекер даёт `rc=0` — `0` нарушений и `48` информационных `note:`: `34`
+`[doctrine]` + `4` `[code]` (упоминания `~/.config/opencode`) и `10`
+`[evidence-inactive]` (доказательства архивных контрактов); как нарушения они не
+засчитываются.
 
 ---
 
@@ -174,12 +175,12 @@ CI (`.github/workflows/ci.yml`) на push/PR гоняет то же на Python 
 **Проверено.**
 - `python3 -m pytest config/bin/tests -q` — **186 passed** (последний прогон
   изоляции тестов; пути CLI резолвятся от `__file__`, не от живой машины).
-- `node --test config/plugins/__tests__/spec-gate.test.ts` — **25/25**.
+- `node --test config/plugins/__tests__/spec-gate.test.ts` — **27/27**.
 - `python3 config/tools/gov/check_portability.py config` — снапшот харденизирован:
   в `permission.external_directory` нет каталогов живой конфигурации OpenCode;
   `bash` всех агентов — объектные карты без human-only CLI.
 - `python3 config/tools/gov/check_portability.py paths` — **rc=0**: `0` нарушений,
-  `45` информационных `note:` (`35` вхождений `~/.config/opencode` + `10`
+  `48` информационных `note:` (`34` `[doctrine]` + `4` `[code]` + `10`
   `[evidence-inactive]`).
 - `python3 config/bin/docs-lint --spec p0-portability-sprint` — без ERROR.
 
